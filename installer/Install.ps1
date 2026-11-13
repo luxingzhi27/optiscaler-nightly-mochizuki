@@ -12,6 +12,8 @@ function Get-Asset($Asset, [string]$Kind, [string]$Path) {
     $allowed = switch ($Kind) {
         'OptiScaler' { '^https://github\.com/[Oo]pti[Ss]caler/OptiScaler-nightly/releases/download/nightly-[0-9]{8}/OptiScaler_[A-Za-z0-9._-]+\.7z$' }
         'Mochizuki'  { '^https://gitlab\.com/(api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-Vulkan-Windows-[0-9.]+-preview-x86_64\.zip$' }
+        'MFGUnlocker' { '^https://github\.com/dashdogy/MFG-Unlocker/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/MFGUnlocker-v[0-9]+\.[0-9]+\.[0-9]+\.zip$' }
+        'OptiPatcher' { '^https://github\.com/[Oo]ptiscaler/OptiPatcher/releases/download/(rolling|v[0-9]+\.[0-9]+(\.[0-9]+)?)/OptiPatcher(_v[0-9]+\.[0-9]+(\.[0-9]+)?[A-Za-z]?)?\.asi$' }
         'CJK'        { '^https://gitlab\.com/(api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-lang-CJK-[0-9.]+\.zip$' }
     }
     if ([string]$Asset.url -cnotmatch $allowed) { throw "Unexpected upstream URL for $Kind." }
@@ -27,10 +29,39 @@ function Assert-OptiLayout([string]$Path) {
         if (-not (Test-Path -LiteralPath (Join-Path $Path $dir) -PathType Container)) { throw "OptiScaler archive is missing $dir/." }
     }
 }
+function Enable-AsiPlugins([string]$Path) {
+    $lines = [IO.File]::ReadAllLines($Path)
+    $section = ''
+    $count = 0
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($lines[$i] -match '^\s*\[([^\]]+)\]') { $section = $Matches[1]; continue }
+        if ($section -ieq 'Plugins' -and $lines[$i] -match '^\s*LoadAsiPlugins\s*=') {
+            $lines[$i] = 'LoadAsiPlugins=true'
+            $count++
+        }
+    }
+    if ($count -ne 1) { throw 'Expected exactly one [Plugins] LoadAsiPlugins setting.' }
+    [IO.File]::WriteAllLines($Path, $lines, [Text.UTF8Encoding]::new($false))
+}
+function Add-GraphicsPlugins($Lock, [string]$Stage, [string]$Opti) {
+    if ($Lock.mfgunlocker.member -cne 'MFGUnlocker.dll' -or $null -ne $Lock.optipatcher.member) {
+        throw 'Unexpected graphics plugin layout.'
+    }
+    $plugins = Join-Path $Opti 'OptiScaler\plugins'
+    New-Item -ItemType Directory -Force -Path $plugins | Out-Null
+    $mfgArchive = Join-Path $Stage 'MFGUnlocker.zip'
+    $mfgContents = Join-Path $Stage 'MFGUnlocker'
+    Get-Asset $Lock.mfgunlocker 'MFGUnlocker' $mfgArchive
+    Expand-Archive -LiteralPath $mfgArchive -DestinationPath $mfgContents
+    Copy-Item -LiteralPath (Join-Path $mfgContents $Lock.mfgunlocker.member) -Destination (Join-Path $plugins 'MFGUnlocker.asi') -Force
+    Get-Asset $Lock.optipatcher 'OptiPatcher' (Join-Path $plugins 'OptiPatcher.asi')
+    Enable-AsiPlugins (Join-Path $Opti 'OptiScaler.ini')
+}
 try {
     if (-not $env:LOCALAPPDATA) { throw 'This installer requires Windows.' }
     $lock = Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json
-    if ($lock.schema_version -ne 1 -or $lock.release_tag -cnotmatch '^mochi-v[0-9]+\.[0-9]+\.[0-9]+_opti-[0-9]{8}$') {
+    if ($lock.schema_version -ne 2 -or $lock.release_tag.Length -gt 101 -or
+        $lock.release_tag -cnotmatch '^mochi-v[0-9]+\.[0-9]+\.[0-9]+_opti-[0-9]{8}-mfg-v[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{8}-patch-(rolling|v[0-9]+\.[0-9]+(\.[0-9]+)?)-[a-f0-9]{12}$') {
         throw 'Invalid or unsupported versions.lock.json.'
     }
     $cache = Join-Path $env:LOCALAPPDATA 'OptiScaler-Mochizuki'
@@ -75,6 +106,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw '7-Zip could not extract OptiScaler.' }
         }
         Assert-OptiLayout $newOpt
+        Add-GraphicsPlugins $lock $stage $newOpt
         $oldOpt = Join-Path $merged 'optiscaler\release'
         Remove-Item -LiteralPath $oldOpt -Recurse -Force
         Move-Item -LiteralPath $newOpt -Destination $oldOpt
@@ -90,6 +122,7 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Cached installer is missing. Rename this folder and retry: $dest" }
     Write-Host 'Choose the actual game EXE, then choose 1) optiscaler.'
     Write-Host 'On first install, select your own compatible nvngx_dlssnr.dll when prompted.'
+    Write-Host 'For NR, use Mochizuki and leave MFG Unlocker DLSS 5 off. Test in an offline game.'
     Write-Host "Bundle cache: $dest"
     & $installer
 } catch {

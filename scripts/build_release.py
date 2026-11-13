@@ -43,6 +43,8 @@ def valid_url(url, family):
     patterns = {
         'opti': r'https://github\.com/[Oo]pti[Ss]caler/OptiScaler-nightly/releases/download/nightly-[0-9]{8}/OptiScaler_[A-Za-z0-9._-]+\.7z',
         'mochi': r'https://gitlab\.com/(?:api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-Vulkan-Windows-[0-9.]+-preview-x86_64\.zip',
+        'mfgunlocker': r'https://github\.com/dashdogy/MFG-Unlocker/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/MFGUnlocker-v[0-9]+\.[0-9]+\.[0-9]+\.zip',
+        'optipatcher': r'https://github\.com/[Oo]pti[Ss]caler/OptiPatcher/releases/download/(?:rolling|v[0-9]+\.[0-9]+(?:\.[0-9]+)?)/OptiPatcher(?:_v[0-9]+\.[0-9]+(?:\.[0-9]+)?[A-Za-z]?)?\.asi',
         'cjk': r'https://gitlab\.com/(?:api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-lang-CJK-[0-9.]+\.zip',
     }
     if not re.fullmatch(patterns[family], url):
@@ -162,6 +164,60 @@ def check_layout(mochi, opti, cjk=None):
             raise ValueError('CJK archive layout changed')
 
 
+def check_pe(data):
+    # Read headers only; these downloaded DLLs are never loaded by the builder.
+    if len(data) < 64 or data[:2] != b'MZ':
+        raise ValueError('Plugin is not a PE image')
+    offset = int.from_bytes(data[60:64], 'little')
+    if offset + 26 > len(data) or data[offset:offset + 4] != b'PE\0\0':
+        raise ValueError('Invalid PE header')
+    if int.from_bytes(data[offset + 4:offset + 6], 'little') != 0x8664:
+        raise ValueError('Plugin is not x64')
+    if not int.from_bytes(data[offset + 22:offset + 24], 'little') & 0x2000:
+        raise ValueError('PE image is not a DLL')
+
+
+def check_addons(paths, lock):
+    names, _ = read_zip(paths['mfgunlocker'], set())
+    with zipfile.ZipFile(paths['mfgunlocker']) as z:
+        members = [i for i in z.infolist() if not i.is_dir() and i.filename == 'MFGUnlocker.dll']
+        if len(members) != 1 or members[0].file_size > 128 * 1024 * 1024:
+            raise ValueError('MFG Unlocker ZIP layout changed')
+        check_pe(z.read(members[0]))
+    if lock['mfgunlocker'].get('member') != 'MFGUnlocker.dll':
+        raise ValueError('Unexpected MFG Unlocker member')
+    if paths['optipatcher'].stat().st_size > 128 * 1024 * 1024:
+        raise ValueError('OptiPatcher too large')
+    check_pe(paths['optipatcher'].read_bytes())
+    if lock['optipatcher'].get('member') is not None:
+        raise ValueError('OptiPatcher must be a raw ASI')
+
+
+def github_plugin(repo, pattern, family, member, rolling=False):
+    releases = api(f'{GH}/repos/{repo}/releases?per_page=20')
+    if rolling and not any(r['tag_name'] == 'rolling' for r in releases):
+        try:
+            releases.append(api(f'{GH}/repos/{repo}/releases/tags/rolling'))
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+    candidates = [(r, a) for r in releases if not r['draft'] and not r['prerelease']
+                  for a in r['assets'] if re.fullmatch(pattern, a['name'])]
+    if not candidates:
+        raise ValueError('No plugin asset found for ' + repo)
+    # Rolling tags are updated in place; publication date alone is incorrect.
+    release, asset = max(candidates, key=lambda pair: (pair[1]['updated_at'], pair[1]['id']))
+    digest = asset.get('digest') or ''
+    if not re.fullmatch(r'sha256:[a-fA-F0-9]{64}', digest):
+        raise ValueError('Published SHA256 missing for ' + repo)
+    if not TAG.fullmatch(release['tag_name']):
+        raise ValueError('Unsafe plugin tag')
+    return {'tag': release['tag_name'], 'url': valid_url(asset['browser_download_url'], family),
+            'sha256': digest[7:].lower(), 'asset_name': asset['name'],
+            'source_url': release['html_url'], 'member': member,
+            'asset_id': asset['id'], 'asset_updated_at': asset['updated_at']}
+
+
 def find_releases():
     entries = api(f'{GH}/repos/{UPSTREAM}/releases?per_page=20')
     candidates = [r for r in entries if not r['draft'] and re.fullmatch(r'nightly-\d{8}', r['tag_name'])]
@@ -183,13 +239,17 @@ def find_releases():
     language = [a for a in links if re.fullmatch(r'DLSSNR-AMD-lang-CJK-[A-Za-z0-9._-]+\.zip', a['name'])]
     if len(windows) != 1 or len(language) > 1:
         raise ValueError('Ambiguous Mochizuki release assets')
+    mfg = github_plugin('dashdogy/MFG-Unlocker', r'MFGUnlocker-v[0-9]+\.[0-9]+\.[0-9]+\.zip', 'mfgunlocker', 'MFGUnlocker.dll')
+    patch = github_plugin('optiscaler/OptiPatcher', r'OptiPatcher(?:_v[0-9]+\.[0-9]+(?:\.[0-9]+)?[A-Za-z]?)?\.asi', 'optipatcher', None, rolling=True)
     tag = f"mochi-{mochi['tag_name']}_opti-{opti['tag_name'].removeprefix('nightly-')}"
+    tag += f"-mfg-{mfg['tag']}-{mfg['sha256'][:8]}-patch-{patch['tag']}-{patch['sha256'][:12]}"
     def entry(a, family):
         return {'url': valid_url(a.get('browser_download_url') or a['url'], family), 'asset_name': a['name']}
-    return {'schema_version': 1, 'release_tag': tag, 'generated_at': datetime.now(timezone.utc).isoformat(),
+    return {'schema_version': 2, 'release_tag': tag, 'generated_at': datetime.now(timezone.utc).isoformat(),
         'optiscaler': dict(entry(asset, 'opti'), tag=opti['tag_name'], sha256=digest[7:].lower(), source_url=opti['html_url']),
         'mochizuki': dict(entry(windows[0], 'mochi'), tag=mochi['tag_name'], source_url=f"https://gitlab.com/mochizuki0323/DLSSNR-AMD/-/releases/{mochi['tag_name']}"),
-        'cjk': entry(language[0], 'cjk') if language else None}
+        'cjk': entry(language[0], 'cjk') if language else None,
+        'mfgunlocker': mfg, 'optipatcher': patch}
 
 
 def release_exists(repo, tag):
@@ -212,7 +272,7 @@ def emit(key, value):
 
 
 def package(lock, out):
-    if not re.fullmatch(r'mochi-v[0-9]+\.[0-9]+\.[0-9]+_opti-[0-9]{8}', lock['release_tag']):
+    if not TAG.fullmatch(lock['release_tag']) or not re.fullmatch(r'mochi-v[0-9]+\.[0-9]+\.[0-9]+_opti-[0-9]{8}-mfg-v[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{8}-patch-(?:rolling|v[0-9]+\.[0-9]+(?:\.[0-9]+)?)-[a-f0-9]{12}', lock['release_tag']):
         raise ValueError('Unsafe release tag')
     out.mkdir(parents=True, exist_ok=True)
     filename = 'OptiScaler-Mochizuki-' + lock['release_tag'] + '-installer.zip'
@@ -234,10 +294,14 @@ def package(lock, out):
 
 - OptiScaler: [{lock['optiscaler']['tag']}]({lock['optiscaler']['source_url']})
 - Mochizuki: [{lock['mochizuki']['tag']}]({lock['mochizuki']['source_url']})
+- MFG Unlocker: [{lock['mfgunlocker']['tag']}]({lock['mfgunlocker']['source_url']})
+- OptiPatcher: [{lock['optipatcher']['tag']}]({lock['optipatcher']['source_url']}) (asset SHA-256 {lock['optipatcher']['sha256'][:12]})
+
+ASI loading is enabled by default. Official OptiScaler nightly is retained; MFG Unlocker features requiring its author's OptiScaler fork are not enabled by this bundle. Only one NR provider should be active at once.
 
 Download and extract the installer ZIP, then run install.cmd. It fetches the pinned official packages, checks their SHA-256 values, and combines them locally. Supply your own nvngx_dlssnr.dll when the upstream installer asks.
 
-This release contains only installer scripts and a version/hash lock. No NVIDIA DLL, extracted model weights, or third-party runtime binaries are distributed here. The OptiScaler asset hash is checked against GitHub's release metadata; Mochizuki/CJK hashes are recorded from the HTTPS downloads. Archive layout and configuration contracts were checked. This does not establish in-game compatibility or performance. Test offline first; do not use with anti-cheat games.
+This release contains only installer scripts and a version/hash lock. No NVIDIA DLL, extracted model weights, or third-party runtime binaries are distributed here. The GitHub asset hashes are checked against GitHub's release metadata; Mochizuki/CJK hashes are recorded from the HTTPS downloads. Archive layout and configuration contracts were checked. This does not establish in-game compatibility or performance. Test offline first; do not use with anti-cheat games.
 '''
     (out / 'release-notes.md').write_text(notes, encoding='utf-8')
     emit('tag', lock['release_tag']); emit('built', 'true')
@@ -257,7 +321,7 @@ def main():
         emit('tag', lock['release_tag']); emit('built', 'false'); return
     with tempfile.TemporaryDirectory(prefix='nr-upstream-') as work:
         paths = {}
-        for key in ('optiscaler', 'mochizuki', 'cjk'):
+        for key in ('optiscaler', 'mochizuki', 'cjk', 'mfgunlocker', 'optipatcher'):
             entry = lock[key]
             if entry is None:
                 paths[key] = None; continue
@@ -268,11 +332,12 @@ def main():
                 shutil.copyfile(args.offline_assets / entry['asset_name'], path)
                 digest = sha(path)
             else:
-                digest = download(valid_url(entry['url'], {'optiscaler': 'opti', 'mochizuki': 'mochi', 'cjk': 'cjk'}[key]), path)
+                digest = download(valid_url(entry['url'], {'optiscaler': 'opti', 'mochizuki': 'mochi', 'cjk': 'cjk', 'mfgunlocker': 'mfgunlocker', 'optipatcher': 'optipatcher'}[key]), path)
             if entry.get('sha256') and entry['sha256'] != digest:
                 raise ValueError('SHA256 mismatch for ' + key)
             entry['sha256'] = digest; paths[key] = path
         check_layout(paths['mochizuki'], paths['optiscaler'], paths['cjk'])
+        check_addons(paths, lock)
         package(lock, args.out)
 
 
