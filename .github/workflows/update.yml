@@ -1,0 +1,132 @@
+name: Update version-locked installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update.yml'
+      - 'scripts/**'
+      - 'installer/**'
+      - 'README.md'
+  schedule:
+    - cron: '17 1,13 * * *'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a new release after checks pass
+        type: boolean
+        default: false
+
+# Enable only after a successful manual dry run. Public repository inactivity
+# can disable schedules after 60 days; GitHub schedules are not exact timers.
+env:
+  SCHEDULED_PUBLISH: 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater
+  cancel-in-progress: false
+
+jobs:
+  validate-windows:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Windows PowerShell 5.1 syntax
+        shell: powershell
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'installer/Install.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) { $parseErrors | Format-List; throw 'Installer syntax check failed' }
+          Write-Host 'Installer parsed successfully; no upstream binary was executed.'
+
+  build:
+    needs: validate-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      built: ${{ steps.build.outputs.built }}
+      tag: ${{ steps.build.outputs.tag }}
+      publish: ${{ steps.gate.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Decide publication mode
+        id: gate
+        env:
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$REQUESTED_PUBLISH" == true ]] || [[ ( "$EVENT_NAME" == schedule || "$EVENT_NAME" == push ) && "$SCHEDULED_PUBLISH" == true ]]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install archive reader
+        run: sudo apt-get update && sudo apt-get install --yes libarchive-tools
+      - name: Build and validate installer
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/build_release.py
+      - name: Keep validated output
+        if: steps.build.outputs.built == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: needs.build.outputs.built == 'true' && needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: installer-release
+          path: dist
+      - name: Publish checked installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,100}', tag):
+              raise ValueError('Unsafe tag')
+          subprocess.run(['sha256sum', '--check', 'SHA256SUMS.txt'], cwd='dist', check=True)
+          assets = sorted(str(p) for p in pathlib.Path('dist').glob('*.zip'))
+          if len(assets) != 1:
+              raise ValueError('Expected one installer ZIP')
+          assets += ['dist/SHA256SUMS.txt', 'dist/versions.lock.json']
+          # The build job checks existing tags. Concurrency serializes runs.
+          # Create as draft, upload assets, then expose the completed release.
+          query = subprocess.run(['gh', 'api', 'repos/' + os.environ['GH_REPO'] + '/releases/tags/' + tag], capture_output=True, text=True)
+          if query.returncode == 0:
+              previous = json.loads(query.stdout)
+              if not previous['draft']:
+                  print('Release already published; leaving it unchanged.')
+                  raise SystemExit(0)
+          elif 'HTTP 404' in query.stderr:
+              subprocess.run(['gh', 'release', 'create', tag, '--draft', '--target', os.environ['TARGET_SHA'], '--title', tag, '--notes-file', 'dist/release-notes.md'], check=True)
+          else:
+              raise RuntimeError(query.stderr)
+          subprocess.run(['gh', 'release', 'upload', tag, *assets, '--clobber'], check=True)
+          subprocess.run(['gh', 'release', 'edit', tag, '--draft=false', '--latest'], check=True)
+          PY
