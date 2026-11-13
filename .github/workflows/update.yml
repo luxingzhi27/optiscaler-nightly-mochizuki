@@ -17,10 +17,10 @@ on:
         type: boolean
         default: false
 
-# Enable only after a successful manual dry run. Public repository inactivity
-# can disable schedules after 60 days; GitHub schedules are not exact timers.
+# Public repository inactivity can disable schedules after 60 days.
+# GitHub schedules are not exact timers.
 env:
-  SCHEDULED_PUBLISH: 'false'
+  SCHEDULED_PUBLISH: 'true'
 
 permissions:
   contents: read
