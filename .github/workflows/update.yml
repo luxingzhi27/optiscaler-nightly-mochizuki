@@ -7,6 +7,7 @@ on:
       - '.github/workflows/update.yml'
       - 'scripts/**'
       - 'installer/**'
+      - 'tests/**'
       - 'README.md'
   schedule:
     - cron: '17 1,13 * * *'
@@ -75,6 +76,10 @@ jobs:
           }
           Write-Host 'Installer syntax, graphics plugin placement and ASI defaults passed. No upstream binary was executed.'
 
+      - name: Exercise optional profiles with synthetic assets
+        shell: powershell
+        run: ./scripts/test_installer.ps1
+
   build:
     needs: validate-windows
     runs-on: ubuntu-24.04
@@ -98,6 +103,8 @@ jobs:
           else
             echo 'publish=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Test release identity and package contracts
+        run: python3 -m unittest discover -s tests -v
       - name: Install archive reader
         run: sudo apt-get update && sudo apt-get install --yes libarchive-tools
       - name: Build and validate installer

@@ -14,9 +14,11 @@ function Get-Asset($Asset, [string]$Kind, [string]$Path) {
         'Mochizuki'  { '^https://gitlab\.com/(api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-Vulkan-Windows-[0-9.]+-preview-x86_64\.zip$' }
         'MFGUnlocker' { '^https://github\.com/dashdogy/MFG-Unlocker/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/MFGUnlocker-v[0-9]+\.[0-9]+\.[0-9]+\.zip$' }
         'OptiPatcher' { '^https://github\.com/[Oo]ptiscaler/OptiPatcher/releases/download/(rolling|v[0-9]+\.[0-9]+(\.[0-9]+)?)/OptiPatcher(_v[0-9]+\.[0-9]+(\.[0-9]+)?[A-Za-z]?)?\.asi$' }
+        'OpenRR'     { '^https://github\.com/TheAutomatic/dlss-5-amd-project/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/OptiScaler-NR-[0-9]+\.[0-9]+\.[0-9]+\.zip$' }
+        'ANR'        { '^https://github\.com/apex-compute/ANR/releases/download/FG-V\.B[0-9]+/anr-fg-V\.B[0-9]+-addon\.zip$' }
         'CJK'        { '^https://gitlab\.com/(api/v4/projects/88319462/packages/generic/dlssnr-amd/[0-9.]+|mochizuki0323/DLSSNR-AMD/-/releases/v[0-9.]+/downloads)/DLSSNR-AMD-lang-CJK-[0-9.]+\.zip$' }
     }
-    if ([string]$Asset.url -cnotmatch $allowed) { throw "Unexpected upstream URL for $Kind." }
+    if (-not $allowed -or [string]$Asset.url -cnotmatch $allowed) { throw "Unexpected upstream URL for $Kind." }
     Write-Host "Downloading $Kind..."
     Invoke-WebRequest -UseBasicParsing -Uri $Asset.url -OutFile $Path -MaximumRedirection 6 -TimeoutSec 600
     if (-not (Test-Sha $Path $Asset.sha256)) { throw "SHA-256 mismatch for $Kind. Nothing will be installed." }
@@ -60,8 +62,8 @@ function Add-GraphicsPlugins($Lock, [string]$Stage, [string]$Opti) {
 try {
     if (-not $env:LOCALAPPDATA) { throw 'This installer requires Windows.' }
     $lock = Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json
-    if ($lock.schema_version -ne 2 -or $lock.release_tag.Length -gt 101 -or
-        $lock.release_tag -cnotmatch '^mochi-v[0-9]+\.[0-9]+\.[0-9]+_opti-[0-9]{8}-mfg-v[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{8}-patch-(rolling|v[0-9]+\.[0-9]+(\.[0-9]+)?)-[a-f0-9]{12}$') {
+    if ($lock.schema_version -ne 3 -or $lock.release_tag.Length -gt 101 -or
+        $lock.release_tag -cnotmatch '^bundle-[0-9]{8}-[a-f0-9]{20}$') {
         throw 'Invalid or unsupported versions.lock.json.'
     }
     $cache = Join-Path $env:LOCALAPPDATA 'OptiScaler-Mochizuki'
@@ -125,6 +127,42 @@ try {
     Write-Host 'For NR, use Mochizuki and leave MFG Unlocker DLSS 5 off. Test in an offline game.'
     Write-Host "Bundle cache: $dest"
     & $installer
+    if ($LASTEXITCODE -ne 0) { throw 'Base installer did not complete successfully; optional addons were not applied.' }
+    Write-Host 'Optional profiles: 0) Keep current base setup (default), 1) OpenRR, 2) ANR FG, 3) OpenRR + ANR FG'
+    Write-Host 'OpenRR requires RX 9000 (RDNA4) and your own nvngx_dlssd.dll 310.9.1.0. OptiFG host stays OFF.'
+    Write-Host 'ANR requires game DLSS frame generation; this profile disables MFG Unlocker until restored. Compatibility is experimental.'
+    $choice = Read-Host 'Choose 0, 1, 2, or 3 (Enter keeps current setup)'
+    if ($choice -and $choice -ne '0') {
+        $profile = switch ($choice) { '1' { 'openrr' } '2' { 'anr' } '3' { 'both' } default { throw 'Invalid selection; optional profile not applied.' } }
+        . (Join-Path $PSScriptRoot 'OptionalProfiles.ps1')
+        $game = (Read-Host 'Close the game. Enter its folder containing the installed OptiScaler.ini').Trim('"')
+        Assert-ProfileStopped $game
+        $rrModel = $null
+        if ($profile -in @('openrr','both')) {
+            if ((Read-Host 'Confirm this is an AMD RX 9000 / RDNA4 system (type YES)') -cne 'YES') { throw 'OpenRR hardware was not confirmed; nothing optional changed.' }
+            $rrModel = (Read-Host 'Path to your own nvngx_dlssd.dll 310.9.1.0 (never uploaded)').Trim('"')
+            Assert-RrModel $rrModel
+        }
+        $optionalStage = Join-Path $cache ('.optional-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $optionalStage | Out-Null
+        try {
+            if ($profile -in @('openrr','both')) {
+                $archive = Join-Path $optionalStage 'OpenRR.zip'
+                Get-Asset $lock.openrr 'OpenRR' $archive
+                Expand-ProfileZip $archive (Join-Path $optionalStage 'openrr') 'openrr'
+            }
+            if ($profile -in @('anr','both')) {
+                $archive = Join-Path $optionalStage 'ANR.zip'
+                Get-Asset $lock.anr 'ANR' $archive
+                Expand-ProfileZip $archive (Join-Path $optionalStage 'anr') 'anr'
+            }
+            $backup = Apply-OptionalProfile $game $optionalStage $profile $rrModel
+            Write-Host 'To switch back, run Restore.cmd from this bootstrap folder and provide the game and backup paths printed above.'
+            Write-Host 'Enable DLSS RR / DLSS frame generation in the game as appropriate; check rendering and frame presentation, not only counters.'
+        } finally {
+            Remove-Item -LiteralPath $optionalStage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 } catch {
     Write-Host ("Setup failed: " + $_.Exception.Message) -ForegroundColor Red
     exit 1
