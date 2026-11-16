@@ -47,6 +47,7 @@ function Assert-RrModel([string]$Path) {
     }
 }
 function Expand-ProfileZip([string]$Archive, [string]$Destination, [ValidateSet('openrr','anr')][string]$Kind) {
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
     try {

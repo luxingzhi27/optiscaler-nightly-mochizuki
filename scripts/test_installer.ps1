@@ -40,6 +40,7 @@ try {
     Assert (-not (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/custom/Apex Neural Rendering FG/dlssg/nvngx_dlssg.dll'))) 'ANR not removed during restore.'
 
     # Selective OpenRR extraction from backslash-containing ZIP; forbidden files never staged.
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive=Join-Path $tmp 'launcher.zip'
     $zip=[IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
