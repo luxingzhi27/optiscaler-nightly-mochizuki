@@ -88,6 +88,9 @@ jobs:
       - name: Verify updater entry point and verified download cache
         shell: powershell
         run: ./scripts/test_bootstrap.ps1
+      - name: Test frame-generation switching with synthetic fixtures
+        shell: powershell
+        run: ./scripts/test_fg_switch.ps1
 
   build:
     needs: validate-windows

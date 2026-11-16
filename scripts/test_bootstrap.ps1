@@ -4,10 +4,11 @@ $root=Split-Path -Parent $PSScriptRoot
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'installer/Install.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted=@('Test-Sha','Get-ReusableZip','Read-BundleLock','Get-BundleCache','Select-UpdateGame')
+$wanted=@('Test-Sha','Get-ReusableZip','Read-BundleLock','Get-BundleCache')
 $definitions=$ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $wanted },$false)
 if ($definitions.Count -ne $wanted.Count) { throw 'Missing bootstrap functions.' }
 foreach ($def in $definitions) { . ([scriptblock]::Create($def.Extent.Text)) }
+. (Join-Path $root 'installer/GamePicker.ps1')
 function Get-Asset($asset,$kind,$path) {
     $script:fakeDownloads++
     [IO.File]::WriteAllText($path,'fixture asset bytes')
