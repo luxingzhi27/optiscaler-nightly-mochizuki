@@ -16,9 +16,20 @@ Windows 的 `tar.exe` 若无法解开 7z，可安装[官方 7-Zip](https://www.7
 - OptiPatcher 只对其[支持列表](https://github.com/optiscaler/OptiPatcher/blob/main/GameSupport.md)里的游戏和版本生效。MFG Unlocker 在官方 OptiScaler 10 的 DX12 + Upscaler 输入可用 XeMFG；其 DLSS FG provider 模式和 Vulkan XeMFG 需要[作者的专用 OptiScaler 构建](https://github.com/dashdogy/MFG-Unlocker/releases/tag/v1.7.1)，本包不包含那条路径。不自动启用帧生成倍率。
 - 上游可能在同一下载地址替换文件，包括 OptiScaler nightly 和 OptiPatcher rolling。旧 Release 如果报 SHA-256 不符，请换用本仓库最新 Release，或使用已经在本机组装好的缓存；安装器不会静默换成新文件。
 
+## 已安装的游戏怎么更新
+
+第一次下载含 `Update.cmd` 的[新版安装器 ZIP](https://github.com/luxingzhi27/optiscaler-nightly-mochizuki/releases/latest)，解压后把这个文件夹留着。以后更新不必重新下载安装器，也不用先卸载。
+
+1. 关闭游戏，双击 **`Update.cmd`**，在弹窗里选择装过组合包的游戏 EXE。也可把 EXE 直接拖到 `Update.cmd` 上。
+2. 脚本查最新正式版，显示版本及游戏目录。输入 **`y`** 开始原地更新。同一次可继续选下一个游戏，已校验的下载会复用。
+3. 保留现有 INI、模型权重和 OpenRR / ANR 配置；不会要求再选 NVIDIA DLL，也不会把停用的 MFG Unlocker 重新打开。OpenRR / ANR 本身不在此入口中更新。
+4. 更新前会备份受影响的文件。如果需要回退，用 **`Restore.cmd`** 输入游戏目录以及更新完成时显示的备份路径。
+
+更新入口识别本组合包的 OptiScaler 安装路线；无法确认归属、使用自定义代理布局或使用其他安装器的游戏会拒绝改动。当前已验证 Mochizuki v0.0.9；未来若模型兼容性未确认，旧更新脚本会停止，不会替换成未经验证的运行时。
+
 ## 可选：OpenRR 光线重建与 ANR 插帧
 
-基础安装不变。基础步骤完成后，输入 **1**（OpenRR）、**2**（ANR FG）、**3**（两者），或直接回车保留默认配置。需要输入游戏目录（有 `OptiScaler.ini`）。先退出游戏，安装器会备份受影响的文件。回退时运行 `Restore.cmd`，填入游戏目录和安装时打印的备份目录。更新基础包或切换选项前请先恢复；如果之后手动改过相关文件，恢复脚本不会覆盖这些新改动。
+基础安装不变。基础步骤完成后，输入 **1**（OpenRR）、**2**（ANR FG）、**3**（两者），或直接回车保留默认配置。需要输入游戏目录（有 `OptiScaler.ini`）。先退出游戏，安装器会备份受影响的文件。回退时运行 `Restore.cmd`，填入游戏目录和安装时打印的备份目录。用 install.cmd 重装基础包或切换选项前请先恢复；用 Update.cmd 原地更新无需先恢复；如果之后手动改过相关文件，恢复脚本不会覆盖这些新改动。
 
 - **[OpenRR-ASI](https://github.com/TheAutomatic/OpenRR-ASI)**：给支持 DLSS 光线重建的游戏使用。此配置只面向 RX 9000；自备 **`nvngx_dlssd.dll` 310.9.1**，它与 Mochizuki 的 `nvngx_dlssnr.dll` 不是同一文件。安装器校验作者启动器的原始 ZIP（约 305 MB），只读取 OpenRR 的 ASI、配置、shader 和许可文件，不运行该启动器，也不开启实验性的 OptiFG 宿主桥接。OpenRR 与 Mochizuki 执行不同的功能。
 - **[ANR FG](https://github.com/apex-compute/ANR/releases)（实验）**：使用官方 addon，不替换 OptiScaler 核心。进游戏启用 NVIDIA/DLSS 帧生成；没有该入口的游戏不保证支持。ANR 配置会为这个游戏停用打包的 MFG Unlocker ASI，不叠加两套插帧。若另外安装了独立帧生成工具，请先手动关闭。OpenRR 与 ANR 同时运行需按游戏实测。

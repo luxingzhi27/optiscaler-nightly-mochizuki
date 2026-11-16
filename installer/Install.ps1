@@ -1,8 +1,10 @@
 # Run from the extracted bootstrap ZIP. Requires Windows PowerShell 5.1 or later.
+param([switch]$Update, [string]$GamePath)
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $lockPath = Join-Path $PSScriptRoot 'versions.lock.json'
-$stage = $null
+$discoveryStage = $null
 function Test-Sha([string]$Path, [string]$Sha) {
     return (Test-Path -LiteralPath $Path -PathType Leaf) -and
         ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ieq $Sha)
@@ -22,6 +24,26 @@ function Get-Asset($Asset, [string]$Kind, [string]$Path) {
     Write-Host "Downloading $Kind..."
     Invoke-WebRequest -UseBasicParsing -Uri $Asset.url -OutFile $Path -MaximumRedirection 6 -TimeoutSec 600
     if (-not (Test-Sha $Path $Asset.sha256)) { throw "SHA-256 mismatch for $Kind. Nothing will be installed." }
+}
+function Get-ReusableZip($Asset, [string]$Kind, [string]$Cache) {
+    if ($Kind -notin @('Mochizuki','CJK') -or $Asset.sha256 -cnotmatch '^[a-f0-9]{64}$') {
+        throw 'Invalid reusable ZIP reference.'
+    }
+    $assetDir = Join-Path $Cache '.verified-downloads'
+    $verified = Join-Path $assetDir ($Asset.sha256 + '.zip')
+    if (Test-Sha $verified $Asset.sha256) { return $verified }
+    New-Item -ItemType Directory -Path $assetDir -Force | Out-Null
+    $temp = Join-Path $assetDir ('.download-' + [guid]::NewGuid().ToString('N') + '.zip')
+    try {
+        Get-Asset $Asset $Kind $temp
+        # Do not overwrite an identical file another installer has just cached.
+        if (-not (Test-Sha $verified $Asset.sha256)) {
+            Move-Item -LiteralPath $temp -Destination $verified -Force
+        }
+        return $verified
+    } finally {
+        if (Test-Path -LiteralPath $temp -PathType Leaf) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+    }
 }
 function Assert-OptiLayout([string]$Path) {
     foreach ($file in @('OptiScaler.dll','OptiScaler.ini','setup_windows.bat')) {
@@ -59,31 +81,33 @@ function Add-GraphicsPlugins($Lock, [string]$Stage, [string]$Opti) {
     Get-Asset $Lock.optipatcher 'OptiPatcher' (Join-Path $plugins 'OptiPatcher.asi')
     Enable-AsiPlugins (Join-Path $Opti 'OptiScaler.ini')
 }
-try {
-    if (-not $env:LOCALAPPDATA) { throw 'This installer requires Windows.' }
-    $lock = Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json
-    if ($lock.schema_version -ne 3 -or $lock.release_tag.Length -gt 101 -or
-        $lock.release_tag -cnotmatch '^bundle-[0-9]{8}-[a-f0-9]{20}$') {
-        throw 'Invalid or unsupported versions.lock.json.'
+function Read-BundleLock([string]$LockFile) {
+    $lock = Get-Content -Raw -LiteralPath $LockFile -Encoding UTF8 | ConvertFrom-Json
+    if ($lock.schema_version -ne 3 -or $lock.installer_edition -ne 1 -or $lock.release_tag -cnotmatch '^bundle-[0-9]{8}-[a-f0-9]{20}$') {
+        throw 'Invalid or unsupported versions.lock.json. Download a newer installer ZIP if necessary.'
     }
-    $cache = Join-Path $env:LOCALAPPDATA 'OptiScaler-Mochizuki'
-    $dest = Join-Path $cache $lock.release_tag
-    $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash
+    return $lock
+}
+function Get-BundleCache($Lock, [string]$LockFile, [string]$Cache) {
+    $dest = Join-Path $Cache $Lock.release_tag
+    $lockHash = (Get-FileHash -LiteralPath $LockFile -Algorithm SHA256).Hash
     $stamp = Join-Path $dest '.bootstrap-ready'
     if (Test-Path -LiteralPath $dest) {
         if ((-not (Test-Path -LiteralPath $stamp -PathType Leaf)) -or
             ((Get-Content -Raw -LiteralPath $stamp).Trim() -ine $lockHash)) {
             throw "Existing cache does not match this release. Rename the cache folder and try again: $dest"
         }
-    } else {
+        return $dest
+    }
+    $stage = $null
+    try {
         New-Item -ItemType Directory -Force -Path $cache | Out-Null
         $stage = Join-Path $cache ('.stage-' + [guid]::NewGuid().ToString('N'))
         $merged = Join-Path $stage 'merged'
         $optArchive = Join-Path $stage 'OptiScaler.7z'
-        $mochiArchive = Join-Path $stage 'Mochizuki.zip'
         New-Item -ItemType Directory -Force -Path $merged | Out-Null
         Get-Asset $lock.optiscaler 'OptiScaler' $optArchive
-        Get-Asset $lock.mochizuki 'Mochizuki' $mochiArchive
+        $mochiArchive = Get-ReusableZip $Lock.mochizuki 'Mochizuki' $Cache
         Expand-Archive -LiteralPath $mochiArchive -DestinationPath $merged
         foreach ($file in @('install.bat','install.ps1','optiscaler\asi\dlssnr-amd.asi','model-tools\dlssnr_extract_model.exe')) {
             if (-not (Test-Path -LiteralPath (Join-Path $merged $file) -PathType Leaf)) { throw "Mochizuki archive is missing $file." }
@@ -93,7 +117,7 @@ try {
         $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
         $extracted = $false
         if ($tar) {
-            & $tar.Source -xf $optArchive -C $newOpt
+            & $tar.Source -xf $optArchive -C $newOpt | Out-Host
             $extracted = $LASTEXITCODE -eq 0
         }
         if (-not $extracted) {
@@ -104,7 +128,7 @@ try {
             if (-not $seven) { throw 'Windows tar could not open the .7z. Install official 7-Zip and retry.' }
             Remove-Item -LiteralPath $newOpt -Recurse -Force
             New-Item -ItemType Directory -Force -Path $newOpt | Out-Null
-            & $seven x $optArchive "-o$newOpt" -y
+            & $seven x $optArchive "-o$newOpt" -y | Out-Host
             if ($LASTEXITCODE -ne 0) { throw '7-Zip could not extract OptiScaler.' }
         }
         Assert-OptiLayout $newOpt
@@ -113,13 +137,88 @@ try {
         Remove-Item -LiteralPath $oldOpt -Recurse -Force
         Move-Item -LiteralPath $newOpt -Destination $oldOpt
         if ($null -ne $lock.cjk) {
-            $cjkArchive = Join-Path $stage 'CJK.zip'
-            Get-Asset $lock.cjk 'CJK' $cjkArchive
+            $cjkArchive = Get-ReusableZip $Lock.cjk 'CJK' $Cache
             Expand-Archive -LiteralPath $cjkArchive -DestinationPath (Join-Path $merged 'dlssnr-amd') -Force
         }
         Set-Content -LiteralPath (Join-Path $merged '.bootstrap-ready') -Value $lockHash -Encoding ASCII
-        [IO.Directory]::Move($merged, $dest)
+        try { [IO.Directory]::Move($merged, $dest) }
+        catch {
+            # Parallel invocations may prepare the same bundle. Accept only the identical complete cache.
+            if (-not (Test-Path -LiteralPath $stamp -PathType Leaf) -or
+                (Get-Content -Raw -LiteralPath $stamp).Trim() -ine $lockHash) { throw }
+        }
+        return $dest
+    } finally {
+        if ($stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
+}
+function Select-UpdateGame([string]$Path) {
+    if (-not $Path) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            $picker = New-Object System.Windows.Forms.OpenFileDialog
+            try {
+                $picker.Title = 'Select an already modded game executable'
+                $picker.Filter = 'Game executable (*.exe)|*.exe'
+                $picker.CheckFileExists = $true
+                if ($picker.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+                $Path = $picker.FileName
+            } finally { $picker.Dispose() }
+        } catch { $Path = Read-Host 'Enter the game EXE or its folder (Enter cancels)' }
+    }
+    if (-not $Path) { return $null }
+    $Path = $Path.Trim().Trim('"')
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSIsContainer) { return $item.FullName }
+    if ($item.Extension -ine '.exe') { throw 'Select an executable or its game folder.' }
+    return $item.DirectoryName
+}
+try {
+    if (-not $env:LOCALAPPDATA) { throw 'This installer requires Windows.' }
+    $cache = Join-Path $env:LOCALAPPDATA 'OptiScaler-Mochizuki'
+    if ($Update) {
+        . (Join-Path $PSScriptRoot 'OptionalProfiles.ps1')
+        . (Join-Path $PSScriptRoot 'GameUpdate.ps1')
+        . (Join-Path $PSScriptRoot 'LatestBundle.ps1')
+        $game = Select-UpdateGame $GamePath
+        if (-not $game) { return }
+        $initialTarget = Assert-GameUpdateTarget $game
+        $discoveryStage = Join-Path ([IO.Path]::GetTempPath()) ('opti-bundle-latest-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $discoveryStage | Out-Null
+        $lockPath = Get-LatestBundleLock $discoveryStage
+        $lock = Read-BundleLock $lockPath
+        if ($lock.mochizuki.tag -cne 'v0.0.9') {
+            throw 'A newer Mochizuki model format has not been verified. No files changed. Download a reviewed updater when available.'
+        }
+        Write-Host ("Latest bundle: {0} (OptiScaler {1}, Mochizuki {2})" -f $lock.release_tag, $lock.optiscaler.tag, $lock.mochizuki.tag)
+        $dest = $null
+        while ($game) {
+            try {
+                $target = if ($initialTarget) { $initialTarget } else { Assert-GameUpdateTarget $game }
+                $initialTarget = $null
+                Write-Host "Selected game folder: $game"
+                if (Test-GameBundleCurrent $target $lock) {
+                    Write-Host 'Already up to date. No files changed.'
+                } else {
+                    Write-Host 'Existing INIs, local models, and optional OpenRR/ANR profiles stay in place.'
+                    if ((Read-Host 'Update this game in place? [y/N]') -in @('y','yes')) {
+                        if (-not $dest) { $dest = Get-BundleCache $lock $lockPath $cache }
+                        $backup = Update-InstalledGame $game $dest $lock
+                    }
+                }
+            } catch {
+                if ($GamePath) { throw }
+                Write-Host ("Could not update this game: " + $_.Exception.Message) -ForegroundColor Red
+            }
+            if ($GamePath -or (Read-Host 'Select another game? [y/N]') -notin @('y','yes')) { break }
+            $game = Select-UpdateGame
+        }
+        return
+    }
+    $lock = Read-BundleLock $lockPath
+    $dest = Get-BundleCache $lock $lockPath $cache
     $installer = Join-Path $dest 'install.bat'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Cached installer is missing. Rename this folder and retry: $dest" }
     Write-Host 'Choose the actual game EXE, then choose 1) optiscaler.'
@@ -167,7 +266,7 @@ try {
     Write-Host ("Setup failed: " + $_.Exception.Message) -ForegroundColor Red
     exit 1
 } finally {
-    if ($stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    if ($discoveryStage -and (Test-Path -LiteralPath $discoveryStage -PathType Container)) {
+        Remove-Item -LiteralPath $discoveryStage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

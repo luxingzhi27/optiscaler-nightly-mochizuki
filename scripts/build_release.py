@@ -315,7 +315,7 @@ def find_releases():
         raise ValueError('ANR tag and filename disagree')
     def entry(a, family):
         return {'url': valid_url(a.get('browser_download_url') or a['url'], family), 'asset_name': a['name']}
-    return {'schema_version': 3, 'generated_at': datetime.now(timezone.utc).isoformat(),
+    return {'schema_version': 3, 'installer_edition': 1, 'generated_at': datetime.now(timezone.utc).isoformat(),
         'optiscaler': dict(entry(asset, 'opti'), tag=opti['tag_name'], sha256=digest[7:].lower(), source_url=opti['html_url']),
         'mochizuki': dict(entry(windows[0], 'mochi'), tag=mochi['tag_name'], source_url=f"https://gitlab.com/mochizuki0323/DLSSNR-AMD/-/releases/{mochi['tag_name']}"),
         'cjk': entry(language[0], 'cjk') if language else None,
@@ -349,7 +349,7 @@ def package(lock, out):
     target = out / filename
     lock_text = json.dumps(lock, indent=2, ensure_ascii=False) + '\n'
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name in ['install.cmd', 'Install.ps1', 'OptionalProfiles.ps1', 'Restore.cmd', 'Restore.ps1']:
+        for name in ['install.cmd', 'Install.ps1', 'OptionalProfiles.ps1', 'Restore.cmd', 'Restore.ps1', 'Update.cmd', 'LatestBundle.ps1', 'GameUpdate.ps1']:
             z.write(ROOT / 'installer' / name, name)
         z.writestr('versions.lock.json', lock_text)
         if (ROOT / 'README.md').exists():
@@ -371,7 +371,7 @@ def package(lock, out):
 
 ASI loading is enabled by default. Official OptiScaler nightly is retained; MFG Unlocker features requiring its author's OptiScaler fork are not enabled by this bundle. Only one NR provider should be active at once. Optional components are off by default, and the OpenRR OptiFG bridge is not installed.
 
-Download and extract the installer ZIP, then run install.cmd. It fetches the pinned official packages, checks their SHA-256 values, and combines them locally. Supply your own nvngx_dlssnr.dll when the upstream installer asks. After the base install, choose OpenRR, ANR FG, both, or press Enter to keep the base setup. Use Restore.cmd with the printed backup path to revert optional changes.
+Download and extract the installer ZIP, then run install.cmd. It fetches the pinned official packages, checks their SHA-256 values, and combines them locally. Supply your own nvngx_dlssnr.dll when the upstream installer asks. After the base install, choose OpenRR, ANR FG, both, or press Enter to keep the base setup. Already installed? Save this extracted folder and run Update.cmd to fetch the latest compatible lock and update an existing game in place without reinstalling or choosing the model again. Use Restore.cmd with the printed backup path to revert the last change.
 
 This release contains only installer scripts and a version/hash lock. No NVIDIA DLL, extracted model weights, or third-party runtime binaries are distributed here. The GitHub asset hashes are checked against GitHub's release metadata; Mochizuki/CJK hashes are recorded from the HTTPS downloads. Archive layout and configuration contracts were checked. This does not establish in-game compatibility or performance. Test offline first; do not use with anti-cheat games.
 '''

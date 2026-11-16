@@ -79,6 +79,15 @@ jobs:
       - name: Exercise optional profiles with synthetic assets
         shell: powershell
         run: ./scripts/test_installer.ps1
+      - name: Verify in-place update and rollback with old-install fixtures
+        shell: powershell
+        run: ./scripts/test_game_update.ps1
+      - name: Verify latest release lock checks
+        shell: powershell
+        run: ./scripts/test_latest_bundle.ps1
+      - name: Verify updater entry point and verified download cache
+        shell: powershell
+        run: ./scripts/test_bootstrap.ps1
 
   build:
     needs: validate-windows
