@@ -41,7 +41,7 @@ def build_identity(lock, root):
     _check_asset_hashes(lock)
     root = Path(root)
     files = set()
-    for folder in ('installer', 'scripts'):
+    for folder in ('installer', 'scripts', 'manager'):
         files.update(path for path in (root / folder).rglob('*')
                      if path.is_file() and '__pycache__' not in path.parts
                      and path.suffix != '.pyc')

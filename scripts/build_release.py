@@ -345,22 +345,25 @@ def package(lock, out):
     if not re.fullmatch(r'bundle-[0-9]{8}-[a-f0-9]{20}', lock['release_tag']):
         raise ValueError('Unsafe release tag')
     out.mkdir(parents=True, exist_ok=True)
-    filename = 'OptiScaler-Mochizuki-' + lock['release_tag'] + '-installer.zip'
+    filename = 'OptiScaler-Manager-' + lock['release_tag'] + '.zip'
     target = out / filename
     lock_text = json.dumps(lock, indent=2, ensure_ascii=False) + '\n'
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name in ['install.cmd', 'Install.ps1', 'OptionalProfiles.ps1', 'Restore.cmd', 'Restore.ps1', 'Update.cmd', 'LatestBundle.ps1', 'GameUpdate.ps1', 'GamePicker.ps1', 'Switch-FG.cmd', 'Switch-FG.ps1', 'FgSwitch.ps1']:
-            z.write(ROOT / 'installer' / name, name)
-        z.writestr('versions.lock.json', lock_text)
+        z.write(ROOT / 'manager' / 'OptiScaler Manager.cmd', 'OptiScaler Manager.cmd')
+        for name in ('Manager.ps1', 'ManagerStore.ps1', 'ManagerEngine.ps1'):
+            z.write(ROOT / 'manager' / name, 'app/' + name)
+        for script in sorted((ROOT / 'installer').glob('*.ps1')):
+            z.write(script, 'app/installer/' + script.name)
+        z.writestr('app/versions.lock.json', lock_text)
         if (ROOT / 'README.md').exists():
-            z.write(ROOT / 'README.md', 'README.md')
+            z.write(ROOT / 'README.md', 'app/README.md')
         if (ROOT / 'LICENSE').exists():
-            z.write(ROOT / 'LICENSE', 'LICENSE')
+            z.write(ROOT / 'LICENSE', 'app/LICENSE')
     if target.stat().st_size > 1024 * 1024:
         raise ValueError('Installer unexpectedly large')
     (out / 'versions.lock.json').write_text(lock_text, encoding='utf-8')
     (out / 'SHA256SUMS.txt').write_text(f'{sha(target)}  {filename}\n{sha(out / "versions.lock.json")}  versions.lock.json\n', encoding='utf-8')
-    notes = f'''## Windows installer: {lock['release_tag']}
+    notes = f'''## OptiScaler Windows Manager: {lock['release_tag']}
 
 - OptiScaler: [{lock['optiscaler']['tag']}]({lock['optiscaler']['source_url']})
 - Mochizuki: [{lock['mochizuki']['tag']}]({lock['mochizuki']['source_url']})
@@ -371,7 +374,7 @@ def package(lock, out):
 
 ASI loading is enabled by default. Official OptiScaler nightly is retained; MFG Unlocker features requiring its author's OptiScaler fork are not enabled by this bundle. Only one NR provider should be active at once. Optional components are off by default, and the OpenRR OptiFG bridge is not installed.
 
-Download and extract the installer ZIP, then run install.cmd. It fetches the pinned official packages, checks their SHA-256 values, and combines them locally. Supply your own nvngx_dlssnr.dll when the upstream installer asks. After the base install, choose OpenRR, ANR FG, both, or press Enter to keep the base setup. Already installed? Save this extracted folder and run Update.cmd to fetch the latest compatible lock and update an existing game in place without reinstalling or choosing the model again. To switch between ANR and XeMFG without reinstalling, close the game and use Switch-FG.cmd. Use Restore.cmd with the printed backup path to revert the last change.
+Download and extract the Manager ZIP, then open **OptiScaler Manager.cmd**. Add each game once, install or adopt it, and manage updates, ANR / XeMFG switching, OpenRR and rollback in one window. Your NVIDIA DLLs are imported once per type and version into a fixed local library. They and the model weights stay on your PC. Existing installations can be adopted without reinstalling. Keep the app directory beside the launcher. The manager checks component updates on demand; it does not replace its own code silently. Older script-only releases remain available under their original tags.
 
 This release contains only installer scripts and a version/hash lock. No NVIDIA DLL, extracted model weights, or third-party runtime binaries are distributed here. The GitHub asset hashes are checked against GitHub's release metadata; Mochizuki/CJK hashes are recorded from the HTTPS downloads. Archive layout and configuration contracts were checked. This does not establish in-game compatibility or performance. Test offline first; do not use with anti-cheat games.
 '''

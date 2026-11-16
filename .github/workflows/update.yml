@@ -7,6 +7,7 @@ on:
       - '.github/workflows/update.yml'
       - 'scripts/**'
       - 'installer/**'
+      - 'manager/**'
       - 'tests/**'
       - 'README.md'
   schedule:
@@ -91,6 +92,15 @@ jobs:
       - name: Test frame-generation switching with synthetic fixtures
         shell: powershell
         run: ./scripts/test_fg_switch.ps1
+      - name: Verify the persistent manager and DLL library
+        shell: powershell
+        run: ./scripts/test_manager_store.ps1
+      - name: Verify managed game operations
+        shell: powershell
+        run: ./scripts/test_manager_engine.ps1
+      - name: Construct the Chinese Windows manager window
+        shell: powershell
+        run: ./manager/Manager.ps1 -SelfTest
 
   build:
     needs: validate-windows
