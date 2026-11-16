@@ -90,6 +90,10 @@ function Import-FromUi([string]$Kind) {
     $status.Text="已导入 $Kind DLL $($dll.version)，后续可直接复用。"
     return $dll
 }
+function Get-RrPathForDefaults {
+    try { $dll=Get-ManagerDefaultDll -Kind RR; if ($dll) { return [string]$dll.path } } catch { }
+    return ''
+}
 function Update-Controls {
     $game=Current-Game
     $s=if ($game) { $script:summaries[$game.id] }
@@ -99,10 +103,9 @@ function Update-Controls {
     $fresh=$s -and $s.State -eq 'Fresh'
     $gameName.Text=if ($game) { $game.name } else { '未选择游戏' }
     $gamePath.Text=if ($game) { $game.game_dir } else { '先添加游戏，旧版可直接接管。' }
-    $install.Text=if ($fresh) { '安装组合包' } else { '更新此游戏' }
+    $install.Text=if ($fresh) { '安装组合包' } else { '更新并补齐组件' }
     $install.Enabled=(-not $busy) -and (-not $running) -and ($existing -or $fresh)
-    $fgApply.Enabled=(-not $busy) -and (-not $running) -and $existing
-    $backend.Enabled=$fgApply.Enabled
+    $fgHelp.Enabled=(-not $busy) -and ($null -ne $game)
     $rr.Enabled=(-not $busy) -and (-not $running) -and $existing -and -not $s.OpenRR
     $rollback.Enabled=(-not $busy) -and (-not $running) -and $existing -and $s.CanRollback
     $open.Enabled=(-not $busy) -and $null -ne $game -and (Test-Path -LiteralPath $game.game_dir -PathType Container)
@@ -112,7 +115,7 @@ function Update-Controls {
     $rrPick.Enabled=(-not $busy) -and $script:dllCounts.RR -gt 1
     $updateAll.Enabled=(-not $busy) -and (@($script:summaries.Values | Where-Object { $_.State -eq 'Existing' -and -not $_.Running }).Count -gt 0)
     $toolTip.SetToolTip($stateInfo,[string]$s.Reason)
-    $stateInfo.Text=if ($running) { '先退出游戏，再点刷新列表。' } elseif ($existing -and $s.OpenRR) { 'OpenRR：已安装' } elseif ($existing) { 'OpenRR：未安装' } elseif ($s -and $s.State -eq 'Unsupported') { '请关闭游戏，再点刷新列表。' } else { '' }
+    $stateInfo.Text=if ($running) { '先退出游戏，再点刷新列表。' } elseif ($existing -and $s.OpenRR) { 'OpenRR：已安装' } elseif ($existing -and $s.RrStaged) { 'OpenRR：已备好，未启用' } elseif ($existing) { 'OpenRR：未安装' } elseif ($s -and $s.State -eq 'Unsupported') { '请关闭游戏，再点刷新列表。' } else { '' }
 }
 function Refresh-Games([string]$Keep='') {
     if (-not $Keep -and $list.SelectedItems.Count) { $Keep=[string]$list.SelectedItems[0].Tag }
@@ -164,31 +167,29 @@ function Start-ManagerOperation([string]$Action,$Request,[string]$Caption) {
             }
             'Install' {
                 $current=Get-ManagerLatest $Work
-                $null=Install-ManagerGame $Request.exe $Request.dll $current
-                [pscustomobject]@{Tag=$current.Lock.release_tag;Message='安装完成。'}
+                $base=Install-ManagerGame $Request.exe $Request.dll $current
+                $components=Complete-ManagerDefaults $base.Game $current $Request.rr (Test-ManagerRrHardware)
+                $message=if ($components.Warnings.Count) {'基础安装完成；有组件未补齐。'} elseif ($components.RrStaged) {'安装完成。ANR / XeMFG 到游戏菜单选；OpenRR 已备好待启用。'} else {'安装完成。ANR / XeMFG 到游戏菜单选。'}
+                [pscustomobject]@{Tag=$current.Lock.release_tag;Message=$message;Warnings=@($components.Warnings)}
             }
             'Update' {
                 $current=Get-ManagerLatest $Work
                 $updated=Update-ManagerGame $Request.game $current
-                $message=if ($updated.Changed) {'已更新。原有设置和模型未重置。'} else {'已经是最新版，没有改动。'}
-                [pscustomobject]@{Tag=$current.Lock.release_tag;Message=$message}
+                $components=Complete-ManagerDefaults $Request.game $current $Request.rr (Test-ManagerRrHardware)
+                $message=if ($components.Warnings.Count) {'基础更新完成；有组件未补齐。'} elseif ($updated.Changed -or $components.Changed) {'更新完成，保留原有设置。游戏菜单可以选择 ANR / XeMFG。'} else {'已是最新版，组件齐全，未改动。'}
+                [pscustomobject]@{Tag=$current.Lock.release_tag;Message=$message;Warnings=@($components.Warnings)}
             }
             'UpdateAll' {
                 $current=Get-ManagerLatest $Work
-                $ok=0; $warnings=@()
+                $ok=0; $warnings=@(); $supported=Test-ManagerRrHardware
                 foreach ($g in @($Request.games)) {
-                    try { $null=Update-ManagerGame $g.game_dir $current; $ok++ }
-                    catch { $warnings+=("$($g.name)："+$_.Exception.Message) }
+                    try {
+                        $null=Update-ManagerGame $g.game_dir $current
+                        $components=Complete-ManagerDefaults $g.game_dir $current $Request.rr $supported
+                        if ($components.Warnings.Count) { $warnings+=@($components.Warnings | ForEach-Object { "$($g.name)：$_" }) } else { $ok++ }
+                    } catch { $warnings+=("$($g.name)："+$_.Exception.Message) }
                 }
-                [pscustomobject]@{Tag=$current.Lock.release_tag;Message=("已处理 $ok 款游戏，"+$warnings.Count+' 款未更新。');Warnings=$warnings}
-            }
-            'Switch' {
-                $fg=Get-BundleFgStatus $Request.game
-                if (($Request.mode -eq 'ANR' -and -not $fg.HasAnr) -or ($Request.mode -eq 'XeMFG' -and -not $fg.HasMfg)) {
-                    $current=Get-ManagerLatest $Work
-                }
-                $null=Set-ManagerFg $Request.game $Request.mode $current
-                [pscustomobject]@{Message=("已切换到 "+$Request.mode+'。重新启动游戏后生效。')}
+                [pscustomobject]@{Tag=$current.Lock.release_tag;Message=("已同步 $ok 款游戏。");Warnings=$warnings}
             }
             'OpenRR' {
                 $current=Get-ManagerLatest $Work
@@ -236,9 +237,7 @@ $details=Put-Control $form GroupBox '选中的游戏' 623 135 255 275; $details.
 $gameName=Put-Control $details Label '' 13 24 228 23; $gameName.AutoEllipsis=$true
 $gamePath=Put-Control $details Label '' 13 48 228 20; $gamePath.AutoEllipsis=$true
 $install=Put-Control $details Button '更新此游戏' 13 75 228 34
-$backend=Put-Control $details ComboBox '' 13 120 110 24; $backend.DropDownStyle='DropDownList'
-[void]$backend.Items.AddRange([object[]]@('ANR','XeMFG')); $backend.SelectedIndex=0
-$fgApply=Put-Control $details Button '切换帧生成' 130 117 111 31
+$fgHelp=Put-Control $details Button '在游戏中选择帧生成…' 13 116 228 31
 $rr=Put-Control $details Button '启用 OpenRR' 13 158 110 31
 $rollback=Put-Control $details Button '回退…' 130 158 111 31
 $open=Put-Control $details Button '打开游戏目录' 13 199 228 31
@@ -253,7 +252,7 @@ $nrPick=Put-Control $library Button '选用已有版本…' 180 48 136 28
 $rrPick=Put-Control $library Button '选用已有版本…' 599 48 136 28
 $bar=Put-Control $form ProgressBar '' 22 527 856 5; $bar.Anchor=$bottomAnchor
 $status=Put-Control $form Label '第一次添加旧游戏，只接管，不改文件。' 22 540 856 25; $status.Anchor=$bottomAnchor; $status.AutoEllipsis=$true
-$secondary=Put-Control $form Label 'DLL 只保存在本机。切换后端前请退出游戏。XeMFG 路径适用于 DX12。' 22 567 856 22
+$secondary=Put-Control $form Label 'DLL 只保存在本机。ANR 和 XeMFG 同时安装，在游戏菜单里选一种。' 22 567 856 22
 $secondary.Anchor=$bottomAnchor; $secondary.ForeColor=[Drawing.Color]::FromArgb(67,87,111)
 
 $toolTip=New-Object Windows.Forms.ToolTip
@@ -280,8 +279,6 @@ $timer.Add_Tick({
     }
 })
 $list.Add_SelectedIndexChanged({
-    $g=Current-Game
-    if ($g -and $script:summaries[$g.id].Mode -in @('ANR','XeMFG')) { $backend.SelectedItem=$script:summaries[$g.id].Mode }
     Update-Controls
 })
 $add.Add_Click({
@@ -303,23 +300,27 @@ $install.Add_Click({
             $dll=Get-ManagerDefaultDll -Kind NR
             if (-not $dll) { $dll=Import-FromUi NR }
             if (-not $dll) { return }
-            Start-ManagerOperation Install @{exe=$g.exe_path;dll=$dll.path} '正在安装，首次需要下载和本地提取模型…'
-        } else { Start-ManagerOperation Update @{game=$g.game_dir} '正在检查并更新该游戏…' }
+            Start-ManagerOperation Install @{exe=$g.exe_path;dll=$dll.path;rr=(Get-RrPathForDefaults)} '正在安装，首次需要下载和本地提取模型…'
+        } else { Start-ManagerOperation Update @{game=$g.game_dir;rr=(Get-RrPathForDefaults)} '正在检查并更新该游戏…' }
     } catch { Ux-Error $_ }
 })
 $updateAll.Add_Click({
     try {
         $games=@($script:games.Values | Where-Object { $script:summaries[$_.id].State -eq 'Existing' -and -not $script:summaries[$_.id].Running })
         if ($games.Count -and (Ask-Yes "原地更新 $($games.Count) 款已安装游戏？请先退出这些游戏。")) {
-            Start-ManagerOperation UpdateAll @{games=$games} '正在逐个更新游戏，已下载的组件会复用…'
+            Start-ManagerOperation UpdateAll @{games=$games;rr=(Get-RrPathForDefaults)} '正在逐个更新游戏，已下载的组件会复用…'
         }
     } catch { Ux-Error $_ }
 })
-$fgApply.Add_Click({
-    try {
-        $g=Current-Game
-        Start-ManagerOperation Switch @{game=$g.game_dir;mode=[string]$backend.SelectedItem} '正在切换帧生成…'
-    } catch { Ux-Error $_ }
+$fgHelp.Add_Click({
+    Show-Notice @'
+按 Insert 打开 OptiScaler 的帧生成页面：
+
+ANR：游戏支持 DLSS 帧生成时，选择 NvngxFG 输入，在 FG Nvngx 选择 Apex Neural Rendering FG。
+XeMFG（DX12）：选择 Upscaler 输入、XeFG 输出。在菜单启用帧生成并选择倍率。
+
+两者同时装好，只选择一个后端运行。改完保存设置，按菜单提示重启游戏。
+'@
 })
 $rr.Add_Click({
     try {
@@ -351,7 +352,7 @@ $open.Add_Click({ try { $g=Current-Game; Invoke-Item -LiteralPath $g.game_dir } 
 $form.Add_FormClosing({ param($s,$e) if ($script:job) { $e.Cancel=$true; $status.Text='操作正在进行，请等当前写入完成再关闭。' } })
 try {
     if ($SelfTest) {
-        if ($form.Controls.Count -lt 10 -or $details.Controls.Count -lt 8 -or $backend.Items.Count -ne 2) { throw 'Manager UI construction failed.' }
+        if ($form.Controls.Count -lt 10 -or $details.Controls.Count -lt 7 -or -not $fgHelp) { throw 'Manager UI construction failed.' }
         Refresh-Games
         Refresh-Library
         Start-ManagerOperation Smoke @{} 'Testing worker...'

@@ -108,7 +108,8 @@ function Restore-OptionalProfile([string]$Game, [string]$Backup, [switch]$Force)
     }
     Write-Host "Optional profile restored. Backup retained: $Backup"
 }
-function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('openrr','anr','both')][string]$Profile, [string]$RrModel) {
+function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('openrr','anr','both')][string]$Profile, [string]$RrModel, [switch]$StageOpenRR) {
+    if ($StageOpenRR -and $Profile -ne 'openrr') { throw 'StageOpenRR is only valid for the openrr profile.' }
     $Game = [IO.Path]::GetFullPath($Game)
     Assert-ProfileStopped $Game
     $ini = Get-ProfilePath $Game 'OptiScaler.ini'
@@ -120,7 +121,7 @@ function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('op
     if (-not (Test-Path -LiteralPath (Get-ProfilePath $Game 'OptiScaler') -PathType Container)) { throw 'Expected the base bundle OptiScaler/ directory.' }
     $writes = @{}; $deletes = @()
     if ($Profile -in @('openrr','both')) {
-        Assert-RrModel $RrModel
+        if (-not $StageOpenRR) { Assert-RrModel $RrModel }
         $source = Get-ProfilePath $Payload 'openrr'
         foreach ($relative in @('openrr-amd.asi','openrr-amd.ini')) {
             if (-not (Test-Path -LiteralPath (Get-ProfilePath $source $relative) -PathType Leaf)) { throw 'Incomplete OpenRR payload.' }
@@ -130,13 +131,38 @@ function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('op
         foreach ($license in @('OpenRR_MIT.txt','OpenRR_THIRD_PARTY.md')) {
             $writes['Licenses/' + $license] = Get-ProfilePath $source ('Licenses/' + $license)
         }
-        $writes['OptiScaler/plugins/openrr-amd.asi'] = Get-ProfilePath $source 'openrr-amd.asi'
-        $writes['openrr-amd/nvngx_dlssd.dll'] = [IO.Path]::GetFullPath($RrModel)
+        $activeRelative = 'OptiScaler/plugins/openrr-amd.asi'
+        $disabledRelative = $activeRelative + '.disabled-rr'
+        $active = Get-ProfilePath $Game $activeRelative
+        $disabled = Get-ProfilePath $Game $disabledRelative
+        if ((Test-Path -LiteralPath $active) -and (Test-Path -LiteralPath $disabled)) { throw 'OpenRR active and staged files both exist; resolve the collision before continuing.' }
+        if ($StageOpenRR) {
+            if (Test-Path -LiteralPath $active) { throw 'OpenRR is already active; staging must not disable an existing installation.' }
+            $writes[$disabledRelative] = Get-ProfilePath $source 'openrr-amd.asi'
+        } else {
+            if (Test-Path -LiteralPath $disabled) {
+                if ((Get-FileHash -LiteralPath $disabled -Algorithm SHA256).Hash -ine
+                    (Get-FileHash -LiteralPath (Get-ProfilePath $source 'openrr-amd.asi') -Algorithm SHA256).Hash) { throw 'Staged OpenRR differs from the verified payload. Restage before enabling.' }
+                $deletes += $disabledRelative
+            }
+            $writes[$activeRelative] = Get-ProfilePath $source 'openrr-amd.asi'
+            $writes['openrr-amd/nvngx_dlssd.dll'] = [IO.Path]::GetFullPath($RrModel)
+        }
         foreach ($shader in $shaders) { $writes['openrr-amd/shaders/' + $shader.Name] = $shader.FullName }
         $rrIni = Get-ProfilePath $Game 'openrr-amd.ini'
-        $rrText = if (Test-Path -LiteralPath $rrIni) { [IO.File]::ReadAllText($rrIni) } else { [IO.File]::ReadAllText((Get-ProfilePath $source 'openrr-amd.ini')) }
-        $rrText = Set-ProfileIni $rrText 'OpenRR' 'OptiFGHost' 'false'
-        $text = Set-ProfileIni $text 'Plugins' 'LoadAsiPlugins' 'true'
+        # Existing tuning is owned by the user. Only a new config gets the safe host default.
+        $writeRrIni = -not (Test-Path -LiteralPath $rrIni)
+        if ($writeRrIni) {
+            $rrText = [IO.File]::ReadAllText((Get-ProfilePath $source 'openrr-amd.ini'))
+            $rrText = Set-ProfileIni $rrText 'OpenRR' 'OptiFGHost' 'false'
+        }
+        if (-not $StageOpenRR) {
+            if (-not $writeRrIni) {
+                $existingRrText = [IO.File]::ReadAllText($rrIni)
+                if ($existingRrText -match '(?im)^\s*OptiFGHost\s*=\s*(true|1|yes|on)\b') { throw 'Existing OpenRR config enables OptiFGHost. Disable the experimental host explicitly before enabling this profile; tuning was not changed.' }
+            }
+            $text = Set-ProfileIni $text 'Plugins' 'LoadAsiPlugins' 'true'
+        }
     }
     if ($Profile -in @('anr','both')) {
         $source = Get-ProfilePath $Payload 'anr/Apex Neural Rendering FG'
@@ -148,14 +174,7 @@ function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('op
             if ($relative -eq 'dlssg/nr_fg.ini' -and (Test-Path -LiteralPath (Get-ProfilePath $Game $target))) { continue }
             $writes[$target] = $file.FullName
         }
-        # Avoid two FG hook providers in this profile, without discarding MFG Unlocker.
-        foreach ($relative in @('OptiScaler/plugins/MFGUnlocker.asi','plugins/MFGUnlocker.asi','MFGUnlocker.asi')) {
-            $target = Get-ProfilePath $Game $relative
-            if (Test-Path -LiteralPath $target -PathType Leaf) {
-                if (Test-Path -LiteralPath ($target + '.disabled-anr')) { throw 'An ANR-disabled MFG backup already exists; restore the previous profile before switching.' }
-                $writes[$relative + '.disabled-anr'] = $target; $deletes += $relative
-            }
-        }
+        # MFG Unlocker stays installed; OptiScaler selects the FG backend.
         $text = Set-ProfileIni $text 'FrameGen' 'FGInput' 'nvngxfg'
         $text = Set-ProfileIni $text 'FrameGen' 'FGOutput' 'nofg'
         $text = Set-ProfileIni $text 'FrameGen' 'FGNvngxReplacement' 'Apex Neural Rendering FG'
@@ -176,9 +195,11 @@ function Apply-OptionalProfile([string]$Game, [string]$Payload, [ValidateSet('op
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
     $generated = Join-Path $backup 'generated'
     New-Item -ItemType Directory -Path $generated | Out-Null
-    [IO.File]::WriteAllText((Join-Path $generated 'OptiScaler.ini'), $text, [Text.UTF8Encoding]::new($false))
-    $writes['OptiScaler.ini'] = Join-Path $generated 'OptiScaler.ini'
-    if ($Profile -in @('openrr','both')) {
+    if (-not $StageOpenRR) {
+        [IO.File]::WriteAllText((Join-Path $generated 'OptiScaler.ini'), $text, [Text.UTF8Encoding]::new($false))
+        $writes['OptiScaler.ini'] = Join-Path $generated 'OptiScaler.ini'
+    }
+    if ($Profile -in @('openrr','both') -and $writeRrIni) {
         [IO.File]::WriteAllText((Join-Path $generated 'openrr-amd.ini'), $rrText, [Text.UTF8Encoding]::new($false))
         $writes['openrr-amd.ini'] = Join-Path $generated 'openrr-amd.ini'
     }

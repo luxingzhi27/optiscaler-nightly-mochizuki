@@ -29,8 +29,8 @@ try {
     Assert ($ini.Contains("[Menu]`r`nFGInput=keep")) 'Unrelated section changed.'
     Assert ($ini.Contains('FGNvngxReplacement=Apex Neural Rendering FG')) 'ANR not selected.'
     Assert ($ini.Contains('FGOutput=nofg')) 'Conflicting FG output retained.'
-    Assert (-not (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi'))) 'MFG stayed active.'
-    Assert (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi.disabled-anr')) 'MFG not preserved.'
+    Assert (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi')) 'ANR removed MFG.'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi.disabled-anr'))) 'ANR disabled MFG.'
     Put (Join-Path $game 'OptiScaler.ini') ($ini + '; later edit')
     Expect-Failure { Restore-OptionalProfile $game $backup }
     Put (Join-Path $game 'OptiScaler.ini') $ini
@@ -60,11 +60,36 @@ try {
     Expect-Failure { Assert-RrModel $model }
     # Version checker was independently rejection-tested. Stub it only for synthetic copy/rollback test.
     function Assert-RrModel([string]$Path) { if ($Path -ne $model) { throw 'Unexpected model test path' } }
+    $stageBackup=Apply-OptionalProfile $game $payload 'openrr' -StageOpenRR
+    $active=Join-Path $game 'OptiScaler/plugins/openrr-amd.asi'
+    $disabled=$active + '.disabled-rr'
+    Assert ((Test-Path -LiteralPath $disabled) -and -not (Test-Path -LiteralPath $active)) 'Dormant RR is active or missing.'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $game 'openrr-amd/nvngx_dlssd.dll'))) 'Staging copied a model.'
+    Assert ((Get-Content -LiteralPath (Join-Path $game 'OptiScaler.ini') -Raw) -ceq $original) 'Staging changed OptiScaler settings.'
+    Assert ((Get-Content -Raw -LiteralPath (Join-Path $game 'openrr-amd.ini')).Contains('OptiFGHost=false')) 'Dormant host default is unsafe.'
+    Expect-Failure { Apply-OptionalProfile $game $payload 'anr' -StageOpenRR }
+    Copy-Item -LiteralPath $disabled -Destination $active
+    Expect-Failure { Apply-OptionalProfile $game $payload 'openrr' $model }
+    Remove-Item -LiteralPath $active
+    $tuning="[OpenRR]`r`nOptiFGHost=false`r`nUserTuning=keep`r`n"
+    Put (Join-Path $game 'openrr-amd.ini') "[OpenRR]`nOptiFGHost=true`nUserTuning=keep"
+    Expect-Failure { Apply-OptionalProfile $game $payload 'openrr' $model }
+    Assert (-not (Test-Path -LiteralPath $active)) 'Unsafe existing host config activated RR.'
+    Put (Join-Path $game 'openrr-amd.ini') $tuning
+    $stagedBytes=[IO.File]::ReadAllBytes($disabled)
+    Put $disabled 'modified plugin'
+    Expect-Failure { Apply-OptionalProfile $game $payload 'openrr' $model }
+    [IO.File]::WriteAllBytes($disabled,$stagedBytes)
     $backup=Apply-OptionalProfile $game $payload 'openrr' $model
+    Assert ((Test-Path -LiteralPath $active) -and -not (Test-Path -LiteralPath $disabled)) 'Staged RR was not promoted.'
+    Assert ((Get-Content -Raw -LiteralPath (Join-Path $game 'openrr-amd.ini')) -ceq $tuning) 'Promotion overwrote RR tuning.'
+    Expect-Failure { Apply-OptionalProfile $game $payload 'openrr' -StageOpenRR }
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $game 'openrr-amd.ini')).Contains('OptiFGHost=false')) 'Host mode enabled.'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $game 'openrr-amd/nvngx_dlssd.dll')) -ceq 'synthetic local model') 'Local RR model not copied.'
     Assert (Test-Path -LiteralPath (Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi')) 'OpenRR-only changed FG provider.'
     Restore-OptionalProfile $game $backup
     Assert (-not (Test-Path -LiteralPath (Join-Path $game 'openrr-amd/nvngx_dlssd.dll'))) 'Local model not restored.'
+    Assert ((Test-Path -LiteralPath $disabled) -and -not (Test-Path -LiteralPath $active)) 'Promotion rollback did not restore dormant alias.'
+    Assert ((Get-Content -Raw -LiteralPath (Join-Path $game 'openrr-amd.ini')) -ceq $tuning) 'Rollback changed user tuning.'
     Write-Host 'PASS: syntax, safe paths, duplicate INI rejection, ANR profile, MFG preservation, restore/edit guard, selective OpenRR extraction, model rejection, standalone host default.'
 } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force } }

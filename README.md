@@ -1,6 +1,6 @@
 # OptiScaler 管理器
 
-一个 Windows x64 窗口，管理官方 OptiScaler nightly、Mochizuki、OptiPatcher、MFG Unlocker，以及可选的 OpenRR 和 ANR。不把 OptiScaler 替换为第三方 fork。
+一个 Windows x64 窗口，管理官方 OptiScaler nightly、Mochizuki、OptiPatcher、MFG Unlocker，以及 OpenRR 和 ANR。不把 OptiScaler 替换为第三方 fork。
 
 ## 开始使用
 
@@ -8,12 +8,12 @@
 2. 点 **添加游戏**，选择实际运行的 EXE。能识别的旧组合包直接显示「已安装」，添加不会修改游戏文件，也不用先卸载。新游戏点「安装组合包」。
 3. 第一次用到 NR 或 OpenRR 时，从窗口导入自己的 DLL。以后新增游戏或更新同类组件，不需要再选择。现有游戏做原地更新，不要求重新导入 DLL 或提取模型。
 
-## 每款游戏分开设置
+## 默认组件与游戏内选择
 
-- **检查更新 / 更新此游戏 / 更新已安装游戏**：检查正式 Release；每套组件下载并校验一次，再逐款原地更新。保留现有 INI、模型和 OpenRR/ANR 配置，不会把停用的 MFG Unlocker 打开。
-- **帧生成**：退出游戏，选 ANR 或 XeMFG，再点「切换帧生成」。已装的组件直接复用；没有所选组件才下载。切换后重新启动游戏。ANR 需要游戏提供 NVIDIA/DLSS 帧生成；官方 nightly 的 XeMFG 路径是 DX12 超分输入。切换不会移除 OpenRR，也不会保证所有组合都能在每款游戏中同时生效。
-- **启用 OpenRR**：当前面向 RX 9000，需要支持 DLSS 光线重建的游戏。实验性的 OptiFG 宿主桥接不启用。
-- **回退**：从选中游戏的备份恢复最近一次可回退的更新或配置操作。文件后来有改动时，管理器会先拒绝覆盖，避免丢设置。
+- **新装或「更新并补齐组件」**：安装 OptiScaler、Mochizuki、OptiPatcher、MFG Unlocker、ANR FG，并准备 OpenRR。旧版如果把 MFG Unlocker 暂停为 `.disabled-anr`，会恢复标准 ASI；**不会重置当前选择的帧生成后端**。每套组件下载校验一次，再逐款使用。
+- **帧生成**：按 **Insert** 打开 OptiScaler。在有原生 DLSS 帧生成的游戏里，ANR 选 **NvngxFG 输入**、**FG Nvngx = Apex Neural Rendering FG**；官方 nightly 的 DX12 XeMFG 选 **Upscaler 输入、XeFG 输出**。两者同时装好，一次只运行一个。改完保存，按菜单提示重启；不需要移除插件。
+- **OpenRR**：组件默认准备好。仅当识别为 RX 9000 且本机已有匹配的 RR DLL 时才自动启用；否则保持未加载，可在管理器检查并导入后启用。不会启用实验性 OptiFG 宿主桥接。
+- **回退**：从选中游戏的备份恢复最近一次可回退的更新或组件操作。文件后来有改动时，会先拒绝覆盖。
 
 ## 本地文件
 

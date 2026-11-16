@@ -122,5 +122,37 @@ try {
     $r=Set-ManagerFg $game1 ANR $null
     Check ($r.Changed -and $r.Mode -eq 'ANR') 'Offline installed ANR switch failed.'
     Check ((Get-UpdateHash (Join-Path $game 'OptiScaler.ini')) -eq $secondIni -and (Get-UpdateHash (Join-Path $game 'OptiScaler/.bundle-update-state.json')) -eq $secondState) 'Switch modified the other game.'
+    # Defaults add both providers without choosing one, and stage RR without a model.
+    $rrStage=Join-Path $tmp 'rr-stage'; $rrFiles=Join-Path $rrStage 'openrr'
+    Put-Pe (Join-Path $rrFiles 'openrr-amd.asi') 5 'OpenRR.dll'
+    Put (Join-Path $rrFiles 'openrr-amd.ini') "[OpenRR]`nOptiFGHost=false"
+    Put (Join-Path $rrFiles 'openrr-amd/shaders/demo.spv') 'verified synthetic shader'
+    Put (Join-Path $rrFiles 'Licenses/OpenRR_MIT.txt') 'fixture license'
+    Put (Join-Path $rrFiles 'Licenses/OpenRR_THIRD_PARTY.md') 'fixture notice'
+    $anrStage=Join-Path $tmp 'anr-stage'
+    $anrParent=Join-Path $anrStage 'anr/Apex Neural Rendering FG'
+    New-Item -ItemType Directory -Path $anrParent -Force | Out-Null
+    Copy-Item -LiteralPath $provider -Destination $anrParent -Recurse
+    function Get-ManagerAddonCache { param($Latest,$Kind)
+        switch ($Kind) { 'ANR' {return $anrStage}; 'OpenRR' {return $rrStage}; default {throw 'MFG already installed'} }
+    }
+    $before=Get-UpdateHash (Join-Path $game 'OptiScaler.ini')
+    $null=[IO.Directory]::CreateDirectory((Join-Path $game 'OptiScaler/plugins'))
+    [IO.File]::Move((Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi'),(Join-Path $game 'OptiScaler/plugins/MFGUnlocker.asi.disabled-anr'))
+    # This simulates a release whose update-state captured the old disabled-plugin profile.
+    $stateFile=Join-Path $game 'OptiScaler/.bundle-update-state.json';$state=Get-Content $stateFile -Raw|ConvertFrom-Json
+    foreach ($file in $state.files) { if ($file.path -eq 'OptiScaler/plugins/MFGUnlocker.asi') { $file.path+='.disabled-anr' } }
+    Put $stateFile ($state | ConvertTo-Json -Depth 8)
+    $r=Complete-ManagerDefaults $game $latest '' $false
+    Check ($r.Warnings.Count -eq 0 -and $r.Changed -and $r.RrStaged -and -not $r.OpenRR) ('Staged default components not installed: '+($r.Warnings -join '; '))
+    Check ((Get-BundleFgStatus $game).HasAnr -and (Get-BundleFgStatus $game).MfgEnabled) 'ANR and MFG did not coexist.'
+    Check ((Get-UpdateHash (Join-Path $game 'OptiScaler.ini')) -eq $before) 'Default sync changed the selected backend.'
+    Check (-not (Test-Path -LiteralPath (Join-Path $game 'openrr-amd/nvngx_dlssd.dll'))) 'Staging copied a model.'
+    $again=Complete-ManagerDefaults $game $latest '' $false
+    Check (-not $again.Changed -and $again.Warnings.Count -eq 0) 'Default sync was not idempotent.'
+    $rrDll=Join-Path $tmp 'nvngx_dlssd.dll'; Put $rrDll 'local model fixture'
+    $r=Enable-ManagerOpenRR $game $rrDll $latest
+    Check ($r.Changed -and (Get-ManagerGameStatus $game).OpenRR -and -not (Get-ManagerGameStatus $game).RrStaged) 'Could not activate prepared OpenRR.'
+    Check ((Get-BundleFgStatus $game).MfgEnabled) 'OpenRR activation affected MFG.'
     Write-Host 'Manager engine tests passed; upstream execution was mocked.'
 } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force } }

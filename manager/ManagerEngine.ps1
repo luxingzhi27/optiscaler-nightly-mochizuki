@@ -61,19 +61,20 @@ function Assert-ManagerFreshFolder([string]$Game) {
 }
 function Get-ManagerGameStatus([string]$Game) {
     $Game=[IO.Path]::GetFullPath($Game).TrimEnd([char[]]'\/')
-    $state='Unsupported'; $mode='Unknown'; $version=''; $reason=''; $rr=$false
+    $state='Unsupported'; $mode='Unknown'; $version=''; $reason=''; $rr=$false; $rrStaged=$false
     try {
         $target=Assert-GameUpdateTarget $Game; $state='Existing'
         if ($target.state) { $version=[string]$target.state.release_tag }
         try { $mode=(Get-BundleFgStatus $Game).Mode } catch { $reason=$_.Exception.Message }
         $rr=Test-Path -LiteralPath (Get-ProfilePath $Game 'OptiScaler/plugins/openrr-amd.asi') -PathType Leaf
+        $rrStaged=Test-Path -LiteralPath (Get-ProfilePath $Game 'OptiScaler/plugins/openrr-amd.asi.disabled-rr') -PathType Leaf
     } catch {
         $initialReason=$_.Exception.Message
         if ($initialReason -like '*Close the game*') { $reason=$initialReason }
         else { try { Assert-ManagerFreshFolder $Game; $state='Fresh' } catch { $reason=$_.Exception.Message } }
     }
     $backups=@(); try { $backups=@(Get-ManagerBackups $Game) } catch { }
-    return [pscustomobject]@{State=$state;Mode=$mode;Version=$version;CanRollback=($backups.Count -gt 0);OpenRR=$rr;Reason=$reason;Running=($reason -like '*Close the game*');Game=$Game}
+    return [pscustomobject]@{State=$state;Mode=$mode;Version=$version;CanRollback=($backups.Count -gt 0);OpenRR=$rr;RrStaged=$rrStaged;Reason=$reason;Running=($reason -like '*Close the game*');Game=$Game}
 }
 function Update-ManagerGame([string]$Game,$Latest) {
     $target=Assert-GameUpdateTarget $Game; $lock=Assert-ManagerLatest $Latest
@@ -102,26 +103,93 @@ function Set-ManagerFg([string]$Game,[ValidateSet('ANR','XeMFG')][string]$Mode,$
         return [pscustomobject]@{Changed=($null -ne $backup);Backup=$backup;Mode=$Mode;Game=$status.Game}
     } finally { if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force } }
 }
-function Enable-ManagerOpenRR([string]$Game,[string]$RrDll,$Latest) {
-    $target=Assert-GameUpdateTarget $Game; $Game=$target.game
-    Assert-RrModel $RrDll
-    foreach ($relative in @('OptiScaler/plugins/openrr-amd.asi','openrr-amd','openrr-amd.ini')) {
-        if (Test-Path -LiteralPath (Get-ProfilePath $Game $relative)) { throw 'OpenRR is already present or partially installed. It was preserved, not reinstalled.' }
+function Get-ManagerAddonCache($Latest,[ValidateSet('OpenRR','ANR','MFG')][string]$Kind) {
+    $lock=Assert-ManagerLatest $Latest
+    $asset=switch ($Kind) { 'OpenRR' {$lock.openrr}; 'ANR' {$lock.anr}; 'MFG' {$lock.mfgunlocker} }
+    if ([string]$asset.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw "Invalid $Kind asset hash." }
+    $root=Get-ProfilePath $Latest.WorkDir 'addons'
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $target=Get-ProfilePath $root ($Kind.ToLowerInvariant()+'-'+$asset.sha256)
+    $stamp=Get-ProfilePath $target '.ready'
+    if (Test-Path -LiteralPath $target) {
+        if (-not (Test-Path -LiteralPath $stamp -PathType Leaf) -or (Get-Content -Raw -LiteralPath $stamp).Trim() -cne $asset.sha256) { throw "Incomplete $Kind cache." }
+        return $target
     }
-    $lock=Assert-ManagerLatest $Latest; $stage=Get-ProfilePath $Latest.WorkDir ('rr-'+[guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    $handle=$null
+    $stage=Get-ProfilePath $root ('.stage-'+[guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
     try {
-        $archive=Join-Path $stage 'openrr.zip'; Get-Asset $lock.openrr OpenRR $archive
-        Expand-ProfileZip $archive (Join-Path $stage 'openrr') openrr
-        $handle=[IO.File]::Open((Get-ProfilePath $Game '.optiscaler-bundle-update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-        foreach ($relative in @('OptiScaler/plugins/openrr-amd.asi','openrr-amd','openrr-amd.ini')) { if (Test-Path -LiteralPath (Get-ProfilePath $Game $relative)) { throw 'OpenRR appeared during preparation; nothing was overwritten.' } }
+        $archive=Join-Path $stage 'payload.zip'
+        switch ($Kind) {
+            'OpenRR' {
+                Get-Asset $asset OpenRR $archive
+                Expand-ProfileZip $archive (Join-Path $stage 'openrr') openrr
+            }
+            'ANR' {
+                Get-VerifiedFgArchive $asset ANR $archive
+                Expand-ProfileZip $archive (Join-Path $stage 'anr') anr
+            }
+            'MFG' {
+                Get-VerifiedFgArchive $asset MFG $archive
+                Expand-MfgSwitchPayload $archive (Join-Path $stage 'MFGUnlocker.asi')
+            }
+        }
+        Remove-Item -LiteralPath $archive -Force
+        [IO.File]::WriteAllText((Join-Path $stage '.ready'),$asset.sha256)
+        try { [IO.Directory]::Move($stage,$target) } catch {
+            if (-not (Test-Path -LiteralPath $stamp -PathType Leaf) -or (Get-Content -Raw -LiteralPath $stamp).Trim() -cne $asset.sha256) { throw }
+        }
+        return $target
+    } finally { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
+}
+function Get-ManagerRrFiles([string]$Game) {
+    $active=Test-Path -LiteralPath (Get-ProfilePath $Game 'OptiScaler/plugins/openrr-amd.asi') -PathType Leaf
+    $staged=Test-Path -LiteralPath (Get-ProfilePath $Game 'OptiScaler/plugins/openrr-amd.asi.disabled-rr') -PathType Leaf
+    $other=(Test-Path -LiteralPath (Get-ProfilePath $Game 'openrr-amd.ini')) -or (Test-Path -LiteralPath (Get-ProfilePath $Game 'openrr-amd'))
+    return [pscustomobject]@{Active=$active;Staged=$staged;Other=$other}
+}
+function Set-ManagerOpenRR([string]$Game,[string]$RrDll,$Latest,[bool]$StageOnly) {
+    $target=Assert-GameUpdateTarget $Game; $Game=$target.game
+    if (-not $StageOnly) { Assert-RrModel $RrDll }
+    $rr=Get-ManagerRrFiles $Game
+    if (($rr.Active -and $rr.Staged) -or ($rr.Other -and -not $rr.Active -and -not $rr.Staged) -or ($rr.Active -and -not $StageOnly)) { throw 'OpenRR is already present or partially installed. It was preserved, not reinstalled.' }
+    if ($rr.Active -or ($rr.Staged -and $StageOnly)) { return [pscustomobject]@{Changed=$false;Backup=$null;Game=$Game} }
+    $stage=Get-ManagerAddonCache $Latest OpenRR
+    $handle=[IO.File]::Open((Get-ProfilePath $Game '.optiscaler-bundle-update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
         if ($handle.Length -ne 0) { throw 'Reserved lock path contains data.' }
-        $before=@(Get-ManagerBackups $Game | ForEach-Object { $_.Path })
-        Apply-OptionalProfile $Game $stage openrr $RrDll
-        $backup=@(Get-ManagerBackups $Game | Where-Object { $_.Path -notin $before } | Select-Object -First 1)
-        return [pscustomobject]@{Changed=$true;Backup=$(if ($backup.Count) {$backup[0].Path} else {$null});Game=$Game}
-    } finally { if ($handle) { $handle.Dispose() }; if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force } }
+        $current=Get-ManagerRrFiles $Game
+        if ($current.Active -ne $rr.Active -or $current.Staged -ne $rr.Staged -or $current.Other -ne $rr.Other) { throw 'OpenRR changed during preparation; nothing was overwritten.' }
+        $backup=Apply-OptionalProfile $Game $stage openrr $RrDll -StageOpenRR:$StageOnly
+        return [pscustomobject]@{Changed=($null -ne $backup);Backup=$backup;Game=$Game}
+    } finally { $handle.Dispose() }
+}
+function Enable-ManagerOpenRR([string]$Game,[string]$RrDll,$Latest) {
+    return Set-ManagerOpenRR $Game $RrDll $Latest $false
+}
+function Test-ManagerRrHardware {
+    try { return @(Get-CimInstance Win32_VideoController -OperationTimeoutSec 5 -ErrorAction Stop |
+        Where-Object { $_.Name -match '(?i)Radeon.*\bRX\s*9\d{3}\b' }).Count -gt 0 } catch { return $false }
+}
+function Complete-ManagerDefaults([string]$Game,$Latest,[string]$RrDll,[bool]$RrSupported) {
+    $warnings=@(); $changed=$false
+    try {
+        $fg=Get-BundleFgStatus $Game
+        if (-not $fg.HasAnr -or -not $fg.MfgEnabled) {
+            $anr=if (-not $fg.HasAnr) { Join-Path (Get-ManagerAddonCache $Latest ANR) 'anr/Apex Neural Rendering FG' }
+            $mfg=if (-not $fg.HasMfg) { Join-Path (Get-ManagerAddonCache $Latest MFG) 'MFGUnlocker.asi' }
+            $changed=$null -ne (Enable-ManagerCoexistingFg $Game $anr $mfg)
+        }
+    } catch { $warnings+=('ANR / MFG: '+$_.Exception.Message) }
+    try {
+        $rr=Get-ManagerRrFiles $Game
+        if (-not $rr.Active) {
+            $stageOnly=(-not $RrDll -or -not $RrSupported)
+            $result=Set-ManagerOpenRR $Game $RrDll $Latest $stageOnly
+            $changed=$changed -or $result.Changed
+        }
+    } catch { $warnings+=('OpenRR: '+$_.Exception.Message) }
+    $rr=Get-ManagerRrFiles $Game
+    return [pscustomobject]@{Changed=$changed;Warnings=@($warnings);OpenRR=$rr.Active;RrStaged=$rr.Staged}
 }
 function Restore-ManagerBackup([string]$Game,[string]$Backup) {
     $Game=[IO.Path]::GetFullPath($Game).TrimEnd([char[]]'\/')

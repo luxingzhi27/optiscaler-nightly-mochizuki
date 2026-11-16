@@ -43,25 +43,31 @@ function Get-BundleFgStatus([string]$Game) {
     $input=Get-FgIniValue $text 'FGInput'; $output=Get-FgIniValue $text 'FGOutput'
     $replacement=Get-FgIniValue $text 'FGNvngxReplacement'; $hudless=Get-FgIniValue $text 'DisableHudless'
     $mode='Custom'
-    if ($input -eq 'nvngxfg' -and $output -eq 'nofg' -and $replacement -eq 'Apex Neural Rendering FG' -and $hudless -eq 'false' -and -not $on -and $hasAnr) { $mode='ANR' }
-    if ($input -eq 'upscaler' -and $output -eq 'xefg' -and $replacement -eq 'None' -and $hudless -eq 'false' -and $on -and (Get-FgIniValue $text 'LoadAsiPlugins' 'Plugins') -eq 'true') { $mode='XeMFG' }
+    if (($input -eq 'nvngxfg' -or $output -in @('dlssg','flipmeter')) -and $replacement -eq 'Apex Neural Rendering FG' -and $hasAnr) { $mode='ANR' }
+    if ($input -eq 'upscaler' -and $output -eq 'xefg' -and $on -and (Get-FgIniValue $text 'LoadAsiPlugins' 'Plugins') -eq 'true') { $mode='XeMFG' }
     return [pscustomobject]@{Game=$Game; Mode=$mode; HasAnr=$hasAnr; HasMfg=($on -or $off); MfgEnabled=$on; MfgPath=$mfg; AnrPath=$anr; Target=$target}
 }
 function Set-BundleFgMode([string]$Game,[ValidateSet('ANR','XeMFG')][string]$Mode,[string]$AnrPayload,[string]$MfgPayload) {
+    return Invoke-BundleFgTransaction $Game $Mode $AnrPayload $MfgPayload
+}
+function Enable-ManagerCoexistingFg([string]$Game,[string]$AnrPayload,[string]$MfgPayload) {
+    return Invoke-BundleFgTransaction $Game Preserve $AnrPayload $MfgPayload
+}
+function Invoke-BundleFgTransaction([string]$Game,[ValidateSet('ANR','XeMFG','Preserve')][string]$Mode,[string]$AnrPayload,[string]$MfgPayload) {
     $status=Get-BundleFgStatus $Game; $Game=$status.Game
     $lockPath=Get-ProfilePath $Game '.optiscaler-bundle-update.lock'
     $handle=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-    try { return Set-BundleFgModeCore $Game $Mode $AnrPayload $MfgPayload } finally { $handle.Dispose() }
+    try { if ($handle.Length -ne 0) { throw 'Reserved updater lock path contains data.' }; return Set-BundleFgModeCore $Game $Mode $AnrPayload $MfgPayload } finally { $handle.Dispose() }
 }
-function Set-BundleFgModeCore([string]$Game,[string]$Mode,[string]$AnrPayload,[string]$MfgPayload) {
+function Set-BundleFgModeCore([string]$Game,[ValidateSet('ANR','XeMFG','Preserve')][string]$Mode,[string]$AnrPayload,[string]$MfgPayload) {
     $status=Get-BundleFgStatus $Game
     $enabled='OptiScaler/plugins/MFGUnlocker.asi'; $disabled=$enabled+'.disabled-anr'
     $writes=@{}; $deletes=@(); $text=[IO.File]::ReadAllText((Get-ProfilePath $Game 'OptiScaler.ini'))
     $values=@{FGInput='nvngxfg'; FGOutput='nofg'; FGNvngxReplacement='Apex Neural Rendering FG'; DisableHudless='false'}
     if ($Mode -eq 'XeMFG' -and (Get-FgIniValue $text 'LoadAsiPlugins' 'Plugins') -ne 'true') { throw 'XeMFG requires [Plugins] LoadAsiPlugins=true. Enable it before switching.' }
     if ($Mode -eq 'XeMFG') { $values.FGInput='upscaler'; $values.FGOutput='xefg'; $values.FGNvngxReplacement='None' }
-    foreach ($key in $values.Keys) { $text=Set-ProfileIni $text 'FrameGen' $key $values[$key] }
-    if ($Mode -eq 'ANR' -and -not $status.HasAnr) {
+    if ($Mode -ne 'Preserve') { foreach ($key in $values.Keys) { $text=Set-ProfileIni $text 'FrameGen' $key $values[$key] } }
+    if ($Mode -in @('ANR','Preserve') -and -not $status.HasAnr) {
         if (-not $AnrPayload) { throw 'ANR is not installed. Supply the verified extracted ANR addon payload.' }
         $provider=Get-ProfilePath ([IO.Path]::GetFullPath($AnrPayload)) 'dlssg'
         if (-not (Test-FgAnrProvider $provider)) { throw 'Prepared ANR provider is incomplete or invalid.' }
@@ -74,11 +80,12 @@ function Set-BundleFgModeCore([string]$Game,[string]$Mode,[string]$AnrPayload,[s
             $writes[$dest]=$file.FullName
         }
     }
-    $desired=if ($Mode -eq 'ANR') { $disabled } else { $enabled }
+    # Keep all providers installed. INI/menu selection, not deleting a plugin, chooses FG.
+    $desired=$enabled
     if ($status.HasMfg -and $status.MfgPath -ne $desired) {
         $writes[$desired]=Get-ProfilePath $Game $status.MfgPath; $deletes+= $status.MfgPath
-    } elseif ($Mode -eq 'XeMFG' -and -not $status.HasMfg) {
-        if (-not $MfgPayload -or -not (Test-UpdatePe $MfgPayload)) { throw 'XeMFG needs a verified MFGUnlocker.asi payload.' }
+    } elseif (($Mode -in @('XeMFG','Preserve') -or $MfgPayload) -and -not $status.HasMfg) {
+        if (-not $MfgPayload -or -not (Test-UpdatePe $MfgPayload)) { throw 'Installing MFG Unlocker needs a verified MFGUnlocker.asi payload.' }
         $writes[$enabled]=[IO.Path]::GetFullPath($MfgPayload)
     }
     # Track the same MFG bytes under their new path so the in-place updater remains valid.
@@ -89,12 +96,13 @@ function Set-BundleFgModeCore([string]$Game,[string]$Mode,[string]$AnrPayload,[s
             [void](Get-ProfilePath $Game $record.path)
             if ($seen.ContainsKey($record.path)) { throw 'Duplicate updater record.' }; $seen[$record.path]=$true
             if ($record.path -in @($enabled,$disabled)) {
+                if ($trackedMfg) { throw 'Duplicate logical MFG entry in updater record.' }
                 $trackedMfg=$true
-                if (-not $status.HasMfg -or $record.path -ne $status.MfgPath -or (Get-UpdateHash (Get-ProfilePath $Game $status.MfgPath)) -ine $record.sha256) { throw 'MFG Unlocker differs from its update record; no files changed.' }
+                if (-not $status.HasMfg -or (Get-UpdateHash (Get-ProfilePath $Game $status.MfgPath)) -ine $record.sha256) { throw 'MFG Unlocker differs from its update record; no files changed.' }
                 if ($record.path -ne $desired) { $record.path=$desired; $stateChanged=$true }
             }
         }
-        if ($Mode -eq 'XeMFG' -and -not $trackedMfg) {
+        if (($status.HasMfg -or $writes.ContainsKey($enabled)) -and -not $trackedMfg) {
             # The updater may have skipped this disabled file. Force its next version check.
             $state.release_tag=''; $stateChanged=$true
             $source=if ($writes.ContainsKey($enabled)) { $writes[$enabled] } else { Get-ProfilePath $Game $enabled }
@@ -102,10 +110,12 @@ function Set-BundleFgModeCore([string]$Game,[string]$Mode,[string]$AnrPayload,[s
         }
     }
     $iniPath=Get-ProfilePath $Game 'OptiScaler.ini'
-    if ($status.Mode -eq $Mode -and $writes.Count -eq 0 -and -not $stateChanged) { Write-Host "Already configured for $Mode. No files changed."; return $null }
+    if (($Mode -eq 'Preserve' -or $status.Mode -eq $Mode) -and $writes.Count -eq 0 -and -not $stateChanged) { if ($Mode -eq 'Preserve') { Write-Host 'ANR and MFG Unlocker are already installed together. No files changed.' } else { Write-Host "Already configured for $Mode. No files changed." }; return $null }
     $backup=Get-ProfilePath $Game ('.optiscaler-bundle-backups/'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
-    $newIni=Join-Path $backup 'new-OptiScaler.ini'; [IO.File]::WriteAllText($newIni,$text,[Text.UTF8Encoding]::new($false)); $writes['OptiScaler.ini']=$newIni
+    if ($Mode -ne 'Preserve') {
+        $newIni=Join-Path $backup 'new-OptiScaler.ini'; [IO.File]::WriteAllText($newIni,$text,[Text.UTF8Encoding]::new($false)); $writes['OptiScaler.ini']=$newIni
+    }
     if ($stateChanged) {
         $newState=Join-Path $backup 'new-update-state.json'
         $state | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $newState -Encoding UTF8
@@ -133,11 +143,12 @@ function Set-BundleFgModeCore([string]$Game,[string]$Mode,[string]$AnrPayload,[s
             $actual=if (Test-Path -LiteralPath $path -PathType Leaf) { Get-UpdateHash $path } else { $null }
             if ($actual -ine $record.after) { throw 'FG switch verification failed.' }
         }
-        if ((Get-BundleFgStatus $Game).Mode -ne $Mode) { throw 'Resulting FG configuration was not recognized.' }
+        if ($Mode -ne 'Preserve' -and (Get-BundleFgStatus $Game).Mode -ne $Mode) { throw 'Resulting FG configuration was not recognized.' }
     } catch {
         $failure=$_; Restore-OptionalProfile $Game $backup -Force; throw $failure
     }
-    Write-Host "Selected $Mode. Restart the game. OpenRR, NR models and tuning files were preserved."
+    if ($Mode -eq 'Preserve') { Write-Host 'ANR and MFG Unlocker are installed together. Current FrameGen selection and all tuning were preserved.' }
+    else { Write-Host "Selected $Mode. MFG Unlocker remains installed; its standalone FG/NR settings were not enabled or changed." }
     Write-Host "Snapshot: $backup. Earlier Restore snapshots may refuse after this switch; use this switcher to change FG modes."
     return $backup
 }
